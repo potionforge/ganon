@@ -357,7 +357,8 @@ describe('SyncController Conflict Handling', () => {
         'test-key',
         expect.objectContaining({
           syncStatus: SyncStatus.Synced
-        })
+        }),
+        false // Don't schedule remote sync during hydration
       );
     });
 
