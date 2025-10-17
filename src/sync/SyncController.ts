@@ -638,7 +638,7 @@ export default class SyncController<T extends BaseStorageMapping> implements ISy
               syncStatus: SyncStatus.Synced,
               digest: remoteMetadata.digest,
               version: remoteMetadata.version,
-            });
+            }, false); // Don't schedule remote sync during hydration
             Log.info(`✅ Ganon: force hydrated key ${key} with hash ${remoteComputedDigest}`);
             return true;
           } else {
@@ -994,7 +994,7 @@ export default class SyncController<T extends BaseStorageMapping> implements ISy
         syncStatus: SyncStatus.Synced,
         digest: resolvedHash,
         version: Date.now(),
-      });
+      }, false); // Don't schedule remote sync during hydration
 
       Log.info(`Ganon: Successfully resolved conflict for key ${key} using strategy: ${config.strategy}`);
     } else {
@@ -1158,7 +1158,7 @@ export default class SyncController<T extends BaseStorageMapping> implements ISy
           syncStatus: SyncStatus.Synced,
           digest: remoteComputedHash,
           version: Date.now(),
-        });
+        }, false); // Don't schedule remote sync during hydration
 
         Log.info(`✅ Ganon: Successfully used remote data despite integrity failure for key ${key}`);
         return { success: true, recoveryStrategy: 'use_remote_despite_integrity' };

@@ -960,7 +960,7 @@ describe('SyncController Tests', () => {
         syncStatus: SyncStatus.Synced,
         digest: computeHash(localValue), // Local value hash (local-wins)
         version: expect.any(Number),
-      });
+      }, false); // Don't schedule remote sync during hydration
     });
 
     // Note: Testing conflict resolution failure is complex with static methods
