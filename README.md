@@ -189,7 +189,7 @@ When a user logs in, you will want to restore the data.
 ```ts
 onAuthStateChanged(async (user) => {
   if (user?.email) {
-    ganon.set('email', email);  // log in by setting a value on the identifier_key
+    ganon.set('email', user.email);  // log in by setting a value on the identifier_key
     await ganon.restore();
   }
 })
