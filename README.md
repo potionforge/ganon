@@ -384,6 +384,109 @@ import {
 
 </details>
 
+### Updating Data Externally
+
+<details>
+<summary><strong>External Data Updates with Metadata Management</strong></summary>
+
+When updating data outside of the GanonDB SDK (e.g., directly through Firestore), you must also update the corresponding `remote_metadata` to maintain data integrity and prevent sync conflicts.
+
+**Note:** This approach currently only works for document-level fields, not subcollections.
+
+#### Required Steps
+
+1. **Compute the hash** of the new data using GanonDB's `computeHash` function
+2. **Prepare the metadata** with the new hash and timestamp
+3. **Update both data and metadata atomically** using a Firestore transaction
+
+#### Example Implementation
+
+```ts
+import { computeHash } from '@potionforge/ganon';
+
+// Your new data
+const newWorkoutCount = 25;
+
+// Get current remote metadata
+const userDocRef = firestore.collection('users').doc(userId).collection('backup').doc('fitness');
+const userDoc = await userDocRef.get();
+const remoteMetadata = userDoc.data()?.remote_metadata || {};
+
+// Step 1: Compute hash and prepare metadata
+const newRemoteMetadata = {
+  ...remoteMetadata,
+  workoutCount: {
+    d: computeHash(newWorkoutCount), // 'd' = digest (hash)
+    v: Date.now(),                   // 'v' = version (timestamp)
+  },
+};
+
+// Step 2: Update both data and metadata atomically
+await firestore.runTransaction(async (transaction) => {
+  transaction.set(userDocRef, {
+    workoutCount: newWorkoutCount,
+    remote_metadata: newRemoteMetadata
+  }, { merge: true });
+});
+```
+
+#### The `computeHash` Function
+
+The `computeHash` function generates a deterministic SHA-256 hash of any data structure:
+
+```ts
+import { computeHash } from '@potionforge/ganon';
+
+// Basic usage
+const hash = computeHash(myData);
+
+// With optional salt for additional uniqueness
+const hashWithSalt = computeHash(myData, 'my-salt');
+```
+
+**Function Signature:**
+```ts
+function computeHash(value: unknown, salt?: string): string
+```
+
+**Parameters:**
+
+- `value`: Any data structure to hash (objects, arrays, primitives)
+- `salt` (optional): Additional string to add uniqueness to the hash
+
+**Returns:** A 16-character hexadecimal string representing the truncated SHA-256 hash
+
+**Key Features:**
+
+- Handles large objects efficiently without deep copying
+- Creates canonical string representation for consistent hashing
+- Sorts object keys for deterministic results
+- Skips undefined values to avoid hash inconsistencies
+- Uses hex representation for numbers to avoid precision issues
+
+#### Metadata Structure
+
+The `remote_metadata` object follows this structure:
+
+```ts
+interface RemoteMetadata {
+  [key: string]: {
+    d: string;  // digest (hash of the data)
+    v: number;  // version (timestamp)
+  }
+}
+```
+
+#### Important Notes
+
+- **Document-level fields only**: This approach currently only works for document-level fields, not subcollections
+- **Always use transactions** when updating both data and metadata to ensure consistency
+- **The hash must match exactly** what GanonDB would compute for the same data
+- **Update the timestamp** (`v`) to the current time to indicate when the data was last modified
+- **Preserve existing metadata** for other keys by spreading the current `remoteMetadata`
+
+</details>
+
 ---
 
 ## 🤝 Contributing

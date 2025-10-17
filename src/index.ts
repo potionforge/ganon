@@ -17,3 +17,4 @@ export { default as SyncError, SyncErrorType, IntegrityFailureError } from './er
 export * from './hooks/useGanon';
 import { LogLevel } from './utils/Log';
 export { LogLevel };
+export { default as computeHash } from './utils/computeHash';
