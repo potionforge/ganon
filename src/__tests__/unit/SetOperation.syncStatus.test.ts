@@ -52,8 +52,7 @@ class TestFirestoreAdapter extends FirestoreAdapter<TestStorage> {
       identifierKey: 'key1',
       cloudConfig: {
         test: {
-          docKeys: ['key1', 'key2', 'lastBackup'],
-          type: 'object'
+          docKeys: ['key1', 'key2', 'lastBackup']
         }
       } as any
     });
@@ -115,8 +114,7 @@ describe('SetOperation Sync Status Tests', () => {
       identifierKey: 'key1',
       cloudConfig: {
         test: {
-          docKeys: ['key1', 'key2', 'lastBackup'],
-          type: 'object'
+          docKeys: ['key1', 'key2', 'lastBackup']
         }
       }
     };

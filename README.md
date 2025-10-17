@@ -128,13 +128,30 @@ import { StorageMapping } from "src/models/StorageMapping";
 
 const logLevel = process.env.NODE_ENV === 'development' ? LogLevel.VERBOSE : LogLevel.NONE;
 
-// Initialize once using your specialized type.
-export const ganon: Ganon<StorageMapping> = Ganon.init<StorageMapping>({
+const config = {
   identifierKey: 'email',
   cloudConfig: cloudBackupConfig,
+  autoStartSync: true,
   logLevel,
-});
+}
+
+// Initialize once using your specialized type.
+export const ganon: Ganon<StorageMapping> = Ganon.init<StorageMapping>(config);
 ```
+
+### GanonDB Config Object
+
+| Property         | Type                     | Description                                        |
+|-----------------|-------------------------|----------------------------------------------------|
+| `identifierKey` | `string`                | Unique user identifier key for users (e.g. `email`, `uid`) |
+| `cloudConfig`   | `CloudBackupConfig<T>`   | Configuration object for Firestore backups where T is your custom storage mapping.        |
+| `logLevel`   | `LogLevel`   | LogLevel enum        |
+| `autoStartSync` | `boolean` | Whether to automatically start the sync interval on initialization. Default: true |
+| `syncInterval` | `number` | Interval in milliseconds between automatic sync operations. If not specified, uses default interval |
+| `remoteReadonly` | `boolean` | Whether the remote Firestore should be treated as read-only (backup-only configuration) |
+| `conflictResolutionConfig` | `Partial<ConflictResolutionConfig>` | Optional configuration for handling data conflicts during sync operations |
+| `integrityFailureConfig` | `Partial<IntegrityFailureConfig>` | Optional configuration for handling integrity failures during sync operations |
+
 
 ## Usage
 
@@ -168,6 +185,7 @@ ganon.set("workouts", userWorkouts);    // GanonDB handles chunking
 When a user logs in, you will want to restore the data.
 
 **Example:**
+
 ```ts
 onAuthStateChanged(async (user) => {
   if (user?.email) {
@@ -189,21 +207,8 @@ async logout() {
 ```
 
 ### Hydration
+
 Every time the app is opened, GanonDB will automatically check the backend to see if something changed. If it did, it will hydrate those values.
-
-
-### GanonDB Config Object
-
-| Property         | Type                     | Description                                        |
-|-----------------|-------------------------|----------------------------------------------------|
-| `identifierKey` | `string`                | Unique user identifier key for users (e.g. `email`, `uid`) |
-| `cloudConfig`   | `CloudBackupConfig<T>`   | Configuration object for Firestore backups where T is your custom storage mapping.        |
-| `logLevel`   | `LogLevel`   | LogLevel enum        |
-| `autoStartSync` | `boolean` | Whether to automatically start the sync interval on initialization. Default: true |
-| `syncInterval` | `number` | Interval in milliseconds between automatic sync operations. If not specified, uses default interval |
-| `remoteReadonly` | `boolean` | Whether the remote Firestore should be treated as read-only (backup-only configuration) |
-| `conflictResolutionConfig` | `Partial<ConflictResolutionConfig>` | Optional configuration for handling data conflicts during sync operations |
-| `integrityFailureConfig` | `Partial<IntegrityFailureConfig>` | Optional configuration for handling integrity failures during sync operations |
 
 ### Conflict Resolution & Integrity Failure Handling
 

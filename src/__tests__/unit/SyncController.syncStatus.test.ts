@@ -53,8 +53,7 @@ describe('SyncController Sync Status Tests', () => {
       identifierKey: 'key1',
       cloudConfig: {
         test: {
-          docKeys: ['key1', 'key2', 'key3'],
-          type: 'object'
+          docKeys: ['key1', 'key2', 'key3']
         }
       }
     };

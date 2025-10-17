@@ -141,18 +141,18 @@ class UpdateMetadataCommand implements IMetadataCommand {
     private remoteService: IRemoteMetadataService<any>,
     private scheduleRemoteSync: boolean
   ) {}
-  
+
   async execute(): Promise<void> {
     await this.localService.set(this.key, this.metadata)
     if (this.scheduleRemoteSync) {
       await this.remoteService.scheduleSync(this.key)
     }
   }
-  
+
   async undo(): Promise<void> {
     // Implementation for rollback
   }
-  
+
   canUndo(): boolean {
     return true
   }
@@ -163,7 +163,7 @@ class UpdateMetadataCommand implements IMetadataCommand {
 ```typescript
 class MetadataCommandExecutor {
   private commandHistory: IMetadataCommand[] = []
-  
+
   async executeCommand(command: IMetadataCommand): Promise<void> {
     try {
       await command.execute()
@@ -173,7 +173,7 @@ class MetadataCommandExecutor {
       throw error
     }
   }
-  
+
   async undoLastCommand(): Promise<void> {
     const lastCommand = this.commandHistory.pop()
     if (lastCommand && lastCommand.canUndo()) {
@@ -200,15 +200,15 @@ class FirestoreMetadataRepository implements IMetadataRepository<any> {
     private adapter: IFirestoreAdapter,
     private userManager: IUserManager
   ) {}
-  
+
   async getMetadata(key: string): Promise<SyncMetadata | undefined> {
     // Implementation
   }
-  
+
   async setMetadata(key: string, metadata: SyncMetadata): Promise<void> {
     // Implementation
   }
-  
+
   // ... other methods
 }
 ```

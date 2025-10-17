@@ -33,8 +33,7 @@ describe('DeleteOperation Sync Status Tests', () => {
 
     const mockCloudConfig: CloudBackupConfig<TestStorage> = {
       test: {
-        docKeys: ['key1', 'key2'],
-        type: 'object'
+        docKeys: ['key1', 'key2']
       }
     };
 
