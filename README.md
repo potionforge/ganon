@@ -439,20 +439,16 @@ import { computeHash } from '@potionforge/ganon';
 
 // Basic usage
 const hash = computeHash(myData);
-
-// With optional salt for additional uniqueness
-const hashWithSalt = computeHash(myData, 'my-salt');
 ```
 
 **Function Signature:**
 ```ts
-function computeHash(value: unknown, salt?: string): string
+function computeHash(value: unknown): string
 ```
 
 **Parameters:**
 
 - `value`: Any data structure to hash (objects, arrays, primitives)
-- `salt` (optional): Additional string to add uniqueness to the hash
 
 **Returns:** A 16-character hexadecimal string representing the truncated SHA-256 hash
 
