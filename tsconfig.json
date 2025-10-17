@@ -1,0 +1,40 @@
+{
+  "compilerOptions": {
+    /* Lib/Target settings */
+    "target": "es2018",
+    "lib": ["es2018", "dom"],
+
+    /* Module resolution */
+    "module": "esnext",
+    "moduleResolution": "node",
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+
+    /* React Native uses Metro bundler, which can handle ES modules */
+    "allowJs": false,
+    "strict": true,
+    "declaration": true,
+    "outDir": "./dist",
+    "rootDir": "./src",
+
+    /* Generates .d.ts files for type definitions */
+    "declarationMap": true,
+    "sourceMap": true,
+
+    /* Keep the JSX setting if you do or might have JSX files */
+    "jsx": "react",
+
+    /* Additional settings */
+    "baseUrl": "./src",
+    "forceConsistentCasingInFileNames": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noImplicitReturns": true,
+    "noFallthroughCasesInSwitch": true,
+    "allowSyntheticDefaultImports": true
+  },
+  "include": ["src/**/*"],
+  "exclude": ["node_modules", "dist"]
+}
