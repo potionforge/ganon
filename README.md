@@ -199,6 +199,9 @@ Every time the app is opened, GanonDB will automatically check the backend to se
 | `identifierKey` | `string`                | Unique user identifier key for users (e.g. `email`, `uid`) |
 | `cloudConfig`   | `CloudBackupConfig<T>`   | Configuration object for Firestore backups where T is your custom storage mapping.        |
 | `logLevel`   | `LogLevel`   | LogLevel enum        |
+| `autoStartSync` | `boolean` | Whether to automatically start the sync interval on initialization. Default: true |
+| `syncInterval` | `number` | Interval in milliseconds between automatic sync operations. If not specified, uses default interval |
+| `remoteReadonly` | `boolean` | Whether the remote Firestore should be treated as read-only (backup-only configuration) |
 | `conflictResolutionConfig` | `Partial<ConflictResolutionConfig>` | Optional configuration for handling data conflicts during sync operations |
 | `integrityFailureConfig` | `Partial<IntegrityFailureConfig>` | Optional configuration for handling integrity failures during sync operations |
 
