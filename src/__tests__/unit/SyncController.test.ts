@@ -53,14 +53,14 @@ describe('SyncController Tests', () => {
       backup: jest.fn(),
       fetch: jest.fn(),
       delete: jest.fn(),
-      backupLastBackupToUserDocument: jest.fn().mockResolvedValue(undefined),
       getCurrentUser: jest.fn().mockReturnValue('test@example.com'),
       cloudConfig: {
         'testDoc': {
           docKeys: ['testKey', 'anotherKey'] as (keyof TestStorage)[],
           subcollectionKeys: [] as (keyof TestStorage)[],
         }
-      }
+      },
+      backupLastBackupToUserDocument: jest.fn().mockResolvedValue(undefined as never),
     } as any;
 
     mockMetadataManager = {
@@ -1412,7 +1412,7 @@ describe('SyncController Tests', () => {
       expect(mockStorage.set).toHaveBeenCalledWith('lastBackup', expect.any(Number));
       
       // Verify lastBackup was synced to remote
-      await new Promise(resolve => setTimeout(resolve, 0)); // Wait for async backup
+      await Promise.resolve(); // Wait for async backup promise
       expect(mockFirestore.backupLastBackupToUserDocument).toHaveBeenCalledTimes(1);
     });
 
