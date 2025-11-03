@@ -325,6 +325,68 @@ export default class Ganon<T extends Record<string, any> & BaseStorageMapping> i
   }
 
   /**
+   * Handles user login lifecycle with smart restore/backup decisions.
+   * - If the same user is already set locally (app reopen), it is a no-op.
+   * - If this is a new login and remote has data, restores from remote.
+   * - If this is a new login and remote has no data, backs up local guest state.
+   * Returns the action performed: "noop", "restore" or "backup".
+   */
+  async login(userId: string): Promise<"noop" | "restore" | "backup"> {
+    if (this.isDestroyed) {
+      throw new SyncError('Cannot perform operation: Ganon instance has been destroyed', SyncErrorType.SyncConfigurationError);
+    }
+
+    const current = this.userManager.getCurrentUser() || this.storageManager.get(this.config.identifierKey) as unknown as string | undefined;
+
+    if (current === userId) {
+      Log.info('Ganon: login called with same user; treating as app reopen (noop)');
+      return "noop";
+    }
+
+    // Set identifier locally to mark user as logged in
+    this.storageManager.set(this.config.identifierKey as Extract<keyof T, string>, userId as unknown as T[Extract<keyof T, string>]);
+
+    // Decide whether remote has data
+    const hasRemote = await this.syncController.hasAnyRemoteData();
+
+    if (hasRemote) {
+      Log.info('Ganon: Existing remote data detected on login - restoring');
+      await this.restore();
+      return "restore";
+    } else {
+      Log.info('Ganon: No remote data detected on login - backing up local guest state');
+      await this.backup();
+      return "backup";
+    }
+  }
+
+  /**
+   * Handles user logout lifecycle.
+   * By default, performs a backup before logging out. You can skip backup with options.backup = false.
+   */
+  async logout(options?: { backup?: boolean }): Promise<void> {
+    if (this.isDestroyed) {
+      throw new SyncError('Cannot perform operation: Ganon instance has been destroyed', SyncErrorType.SyncConfigurationError);
+    }
+
+    const doBackup = options?.backup !== false;
+
+    try {
+      if (doBackup && this.isUserLoggedIn()) {
+        Log.info('Ganon: Performing backup on logout');
+        await this.backup();
+      }
+    } finally {
+      // Stop sync and cancel pending operations
+      this.stopSync();
+      this.syncController.cancelPendingOperations();
+
+      // Clear current user identifier
+      this.storageManager.remove(this.config.identifierKey as Extract<keyof T, string>);
+    }
+  }
+
+  /**
    * Cleans up all resources used by Ganon.
    * This includes stopping sync, destroying the sync controller, and cleaning up the network monitor.
    */
