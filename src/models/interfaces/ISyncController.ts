@@ -21,4 +21,5 @@ export interface ISyncController<T extends BaseStorageMapping> {
   getKeysByStatus(status: SyncStatus): Extract<keyof T, string>[];
   getSyncStatusSummary(): Record<SyncStatus, number>;
   hasPendingOperations(): boolean;
+  hasAnyRemoteData(): Promise<boolean>;
 }

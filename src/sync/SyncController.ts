@@ -67,6 +67,30 @@ export default class SyncController<T extends BaseStorageMapping> implements ISy
   }
 
   /**
+   * Checks if any remote metadata exists for configured keys.
+   * Used to decide whether to restore (existing user) or backup (new user).
+   */
+  async hasAnyRemoteData(): Promise<boolean> {
+    Log.verbose('Ganon: SyncController.hasAnyRemoteData');
+    if (!this.userManager.isUserLoggedIn()) {
+      return false;
+    }
+
+    const allKeys = this._getAllConfiguredKeys();
+    for (const key of allKeys) {
+      try {
+        const remoteMeta = await this.metadataManager.getRemoteMetadataOnly(key);
+        if (remoteMeta) {
+          return true;
+        }
+      } catch (e) {
+        Log.warn(`Ganon: hasAnyRemoteData error checking key ${String(key)}: ${e}`);
+      }
+    }
+    return false;
+  }
+
+  /**
    * Gets the integrity failure configuration with defaults
    */
   private get _integrityFailureConfig(): IntegrityFailureConfig {
