@@ -182,29 +182,49 @@ ganon.set("workouts", userWorkouts);    // GanonDB handles chunking
 
 ### User login
 
-When a user logs in, you will want to restore the data.
+Ganon provides a smart `login()` method that automatically handles the login lifecycle:
+
+- **App reopen**: If the same user is already logged in, it's treated as an app reopen (no-op)
+- **Existing user**: If remote data exists, it restores from the cloud
+- **New user**: If no remote data exists, it backs up local guest state to the cloud
 
 **Example:**
 
 ```ts
 onAuthStateChanged(async (user) => {
   if (user?.email) {
-    ganon.set('email', user.email);  // log in by setting a value on the identifier_key
-    await ganon.restore();
+    const action = await ganon.login(user.email);
+    console.log(`Login action: ${action}`); // "noop", "restore", or "backup"
   }
 })
 ```
 
+**Return values:**
+- `"noop"` - Same user already logged in (app reopen scenario)
+- `"restore"` - Existing user detected, restored from remote
+- `"backup"` - New user detected, backed up local guest state
+
 ### User logout
 
-When a user logs out, you may want to make sure data is backed up.
+Ganon provides a `logout()` method that automatically handles cleanup:
+
+- **Backs up data** by default before logging out (can be skipped)
+- **Stops sync interval** and cancels pending operations
+- **Clears user identifier** from local storage
+
+**Example:**
 
 ```ts
 async logout() {
-  await ganon.backup();
-  ganon.clearAllData();
+  // Backs up by default
+  await ganon.logout();
+  
+  // Or skip backup if needed
+  await ganon.logout({ backup: false });
 }
 ```
+
+**Note:** The old manual approach (`ganon.backup()` + `ganon.clearAllData()`) still works, but using `logout()` is recommended as it handles all cleanup automatically.
 
 ### Hydration
 
