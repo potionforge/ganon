@@ -51,6 +51,7 @@ describe('SyncController - Race Conditions', () => {
       backup: jest.fn(),
       fetch: jest.fn(),
       delete: jest.fn(),
+      backupLastBackupToUserDocument: jest.fn().mockResolvedValue(undefined),
       confirm: jest.fn(),
       dangerouslyDelete: jest.fn(),
       setCurrentUser: jest.fn(),
