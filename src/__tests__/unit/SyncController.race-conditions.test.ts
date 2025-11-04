@@ -57,7 +57,8 @@ describe('SyncController - Race Conditions', () => {
       clearCurrentUser: jest.fn(),
       getCurrentUser: jest.fn(),
       isUserLoggedIn: jest.fn(),
-      cloudConfig: {}
+      cloudConfig: {},
+      backupLastBackupToUserDocument: jest.fn().mockResolvedValue(undefined as never),
     } as any;
 
     mockMetadataManager = {

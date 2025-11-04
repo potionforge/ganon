@@ -67,6 +67,30 @@ export default class SyncController<T extends BaseStorageMapping> implements ISy
   }
 
   /**
+   * Checks if any remote metadata exists for configured keys.
+   * Used to decide whether to restore (existing user) or backup (new user).
+   */
+  async hasAnyRemoteData(): Promise<boolean> {
+    Log.verbose('Ganon: SyncController.hasAnyRemoteData');
+    if (!this.userManager.isUserLoggedIn()) {
+      return false;
+    }
+
+    const allKeys = this._getAllConfiguredKeys();
+    for (const key of allKeys) {
+      try {
+        const remoteMeta = await this.metadataManager.getRemoteMetadataOnly(key);
+        if (remoteMeta) {
+          return true;
+        }
+      } catch (e) {
+        Log.warn(`Ganon: hasAnyRemoteData error checking key ${String(key)}: ${e}`);
+      }
+    }
+    return false;
+  }
+
+  /**
    * Gets the integrity failure configuration with defaults
    */
   private get _integrityFailureConfig(): IntegrityFailureConfig {
@@ -156,7 +180,7 @@ export default class SyncController<T extends BaseStorageMapping> implements ISy
     try {
       const results = await this.operationRepo.processOperations();
       if (results && results.some(result => result.success)) {
-        this._updateLocalLastBackup();
+        this._updateLastBackup();
       }
     } finally {
       this.syncInProgress = false;
@@ -315,7 +339,7 @@ export default class SyncController<T extends BaseStorageMapping> implements ISy
       Log.info(`✅ Ganon: syncAll completed for ${backedUpKeys.length} keys - ${failedKeys.length} failed - ${skippedKeys.length} skipped`);
 
       if (backedUpKeys.length > 0) {
-        this._updateLocalLastBackup();
+        this._updateLastBackup();
       }
 
       return {
@@ -756,11 +780,21 @@ export default class SyncController<T extends BaseStorageMapping> implements ISy
   /* P R I V A T E */
 
   /**
-   * Updates the last backup timestamp in local storage.
+   * Updates the last backup timestamp in local storage and syncs it to the remote user document.
    */
-  private _updateLocalLastBackup(): void {
-    Log.verbose('Ganon: SyncController._updateLocalLastBackup');
-    this.storage.set('lastBackup' as Extract<keyof T, string>, Date.now() as T[Extract<keyof T, string>]);
+  private _updateLastBackup(): void {
+    Log.verbose('Ganon: SyncController._updateLastBackup');
+    const timestamp = Date.now();
+    this.storage.set('lastBackup' as Extract<keyof T, string>, timestamp as T[Extract<keyof T, string>]);
+    
+    // Automatically sync lastBackup to the user document as a field-level entry
+    // This happens automatically without requiring cloudConfig configuration
+    if (this.userManager.isUserLoggedIn()) {
+      this.firestore.backupLastBackupToUserDocument(timestamp).catch(error => {
+        Log.error(`Ganon: Failed to sync lastBackup to remote: ${error}`);
+        // Don't throw - we don't want lastBackup sync failures to break the main sync flow
+      });
+    }
   }
   /**
    * Internal method that processes keys in batches, handling the common logic for both

@@ -700,6 +700,35 @@ export default class FirestoreManager<T extends BaseStorageMapping> implements I
   }
 
   /**
+   * Backs up the lastBackup timestamp to the user document as a field-level entry.
+   * This is called automatically and does not require configuration in cloudConfig.
+   * @param timestamp - The timestamp value to backup
+   * @param options - Optional parameters for the backup operation
+   * @returns Promise that resolves when the backup is complete
+   * @throws {SyncError} Throws error if backup fails
+   */
+  async backupLastBackupToUserDocument(
+    timestamp: number,
+    options?: { transaction?: FirebaseFirestoreTypes.Transaction }
+  ): Promise<void> {
+    Log.verbose('Ganon: FirestoreManager.backupLastBackupToUserDocument');
+
+    if (!this.userManager.isUserLoggedIn()) {
+      Log.verbose('Ganon: Skipping lastBackup backup - user not logged in');
+      return;
+    }
+
+    try {
+      const userRef = this.referenceManager.getUserRef();
+      await this._backupDocumentField(userRef, 'lastBackup' as Extract<keyof T, string>, timestamp, options);
+      Log.info('Ganon: Successfully backed up lastBackup to user document');
+    } catch (error) {
+      Log.error(`Ganon: Failed to backup lastBackup to user document: ${error}`);
+      // Don't throw - we don't want lastBackup sync failures to break the main sync flow
+    }
+  }
+
+  /**
    * Backs up a value to a Firestore subcollection
    * @param ref - The collection reference to backup to
    * @param key - The key to backup the value for

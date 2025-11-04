@@ -59,7 +59,8 @@ describe('SyncController Tests', () => {
           docKeys: ['testKey', 'anotherKey'] as (keyof TestStorage)[],
           subcollectionKeys: [] as (keyof TestStorage)[],
         }
-      }
+      },
+      backupLastBackupToUserDocument: jest.fn().mockResolvedValue(undefined as never),
     } as any;
 
     mockMetadataManager = {
@@ -1313,6 +1314,7 @@ describe('SyncController Tests', () => {
   describe('lastBackup Property Updates', () => {
     beforeEach(() => {
       mockUserManager.isUserLoggedIn.mockReturnValue(true);
+      jest.clearAllMocks();
     });
 
     it('should update lastBackup when keys are successfully synced in syncPending', async () => {
@@ -1322,8 +1324,13 @@ describe('SyncController Tests', () => {
       // Execute sync
       await syncController.syncPending();
 
-      // Verify lastBackup was updated
+      // Verify lastBackup was updated locally
       expect(mockStorage.set).toHaveBeenCalledWith('lastBackup', expect.any(Number));
+      
+      // Verify lastBackup was synced to remote
+      await Promise.resolve(); // Wait for async backup promise
+      expect(mockFirestore.backupLastBackupToUserDocument).toHaveBeenCalledTimes(1);
+      expect(mockFirestore.backupLastBackupToUserDocument).toHaveBeenCalledWith(expect.any(Number));
     });
 
     it('should not update lastBackup when no keys are successfully synced', async () => {
@@ -1333,8 +1340,12 @@ describe('SyncController Tests', () => {
       // Execute sync
       await syncController.syncPending();
 
-      // Verify lastBackup was not updated
+      // Verify lastBackup was not updated locally
       expect(mockStorage.set).not.toHaveBeenCalledWith('lastBackup', expect.any(Number));
+      
+      // Verify lastBackup was not synced to remote
+      await Promise.resolve(); // Wait for async backup promise
+      expect(mockFirestore.backupLastBackupToUserDocument).not.toHaveBeenCalled();
     });
 
     it('should update lastBackup when keys are successfully synced in syncAll', async () => {
@@ -1345,8 +1356,13 @@ describe('SyncController Tests', () => {
       // Execute sync all
       await syncController.syncAll();
 
-      // Verify lastBackup was updated
+      // Verify lastBackup was updated locally
       expect(mockStorage.set).toHaveBeenCalledWith('lastBackup', expect.any(Number));
+      
+      // Verify lastBackup was synced to remote
+      await Promise.resolve(); // Wait for async backup promise
+      expect(mockFirestore.backupLastBackupToUserDocument).toHaveBeenCalledTimes(1);
+      expect(mockFirestore.backupLastBackupToUserDocument).toHaveBeenCalledWith(expect.any(Number));
     });
 
     it('should not update lastBackup when syncAll has no successful backups', async () => {
@@ -1357,8 +1373,12 @@ describe('SyncController Tests', () => {
       // Execute sync all
       await syncController.syncAll();
 
-      // Verify lastBackup was not updated
+      // Verify lastBackup was not updated locally
       expect(mockStorage.set).not.toHaveBeenCalledWith('lastBackup', expect.any(Number));
+      
+      // Verify lastBackup was not synced to remote
+      await Promise.resolve(); // Wait for async backup promise
+      expect(mockFirestore.backupLastBackupToUserDocument).not.toHaveBeenCalled();
     });
 
     it('should update lastBackup only once when multiple keys are synced in the same batch', async () => {
@@ -1371,9 +1391,13 @@ describe('SyncController Tests', () => {
       // Execute sync
       await syncController.syncPending();
 
-      // Verify lastBackup was updated only once
+      // Verify lastBackup was updated only once locally
       expect(mockStorage.set).toHaveBeenCalledTimes(1);
       expect(mockStorage.set).toHaveBeenCalledWith('lastBackup', expect.any(Number));
+      
+      // Verify lastBackup was synced to remote only once
+      await Promise.resolve(); // Wait for async backup promise
+      expect(mockFirestore.backupLastBackupToUserDocument).toHaveBeenCalledTimes(1);
     });
 
     it('should update lastBackup when a key is successfully deleted', async () => {
@@ -1384,8 +1408,61 @@ describe('SyncController Tests', () => {
       syncController.markAsDeleted('testKey');
       await syncController.syncPending();
 
-      // Verify lastBackup was updated
+      // Verify lastBackup was updated locally
       expect(mockStorage.set).toHaveBeenCalledWith('lastBackup', expect.any(Number));
+      
+      // Verify lastBackup was synced to remote
+      await Promise.resolve(); // Wait for async backup promise
+      expect(mockFirestore.backupLastBackupToUserDocument).toHaveBeenCalledTimes(1);
+    });
+
+    it('should sync lastBackup to remote with the same timestamp as local update', async () => {
+      // Setup test data
+      mockOperationRepo.processOperations.mockResolvedValue([{ success: true, key: 'testKey' }]);
+
+      // Execute sync
+      await syncController.syncPending();
+
+      // Get the timestamp that was set locally
+      const lastBackupCall = mockStorage.set.mock.calls.find(call => call[0] === 'lastBackup');
+      const localTimestamp = lastBackupCall![1] as number;
+
+      // Verify the same timestamp was sent to remote
+      await Promise.resolve(); // Wait for async backup promise
+      expect(mockFirestore.backupLastBackupToUserDocument).toHaveBeenCalledWith(localTimestamp);
+    });
+
+    it('should not sync lastBackup to remote when user is not logged in', async () => {
+      // Setup test data
+      mockUserManager.isUserLoggedIn.mockReturnValue(false);
+      mockOperationRepo.processOperations.mockResolvedValue([{ success: true, key: 'testKey' }]);
+
+      // Execute sync
+      await syncController.syncPending();
+
+      // Verify lastBackup was updated locally
+      expect(mockStorage.set).toHaveBeenCalledWith('lastBackup', expect.any(Number));
+      
+      // Verify lastBackup was NOT synced to remote
+      await Promise.resolve(); // Wait for async backup promise
+      expect(mockFirestore.backupLastBackupToUserDocument).not.toHaveBeenCalled();
+    });
+
+    it('should handle errors when syncing lastBackup to remote gracefully', async () => {
+      // Setup test data
+      const syncError = new Error('Network error');
+      mockFirestore.backupLastBackupToUserDocument.mockRejectedValue(syncError);
+      mockOperationRepo.processOperations.mockResolvedValue([{ success: true, key: 'testKey' }]);
+
+      // Execute sync - should not throw
+      await expect(syncController.syncPending()).resolves.not.toThrow();
+
+      // Verify lastBackup was still updated locally despite remote error
+      expect(mockStorage.set).toHaveBeenCalledWith('lastBackup', expect.any(Number));
+      
+      // Verify remote backup was attempted
+      await Promise.resolve(); // Wait for async backup promise
+      expect(mockFirestore.backupLastBackupToUserDocument).toHaveBeenCalledTimes(1);
     });
   });
 
