@@ -349,15 +349,23 @@ export default class Ganon<T extends Record<string, any> & BaseStorageMapping> i
     // Decide whether remote has data
     const hasRemote = await this.syncController.hasAnyRemoteData();
 
+    let result: "restore" | "backup";
     if (hasRemote) {
       Log.info('Ganon: Existing remote data detected on login - restoring');
       await this.restore();
-      return "restore";
+      result = "restore";
     } else {
       Log.info('Ganon: No remote data detected on login - backing up local guest state');
       await this.backup();
-      return "backup";
+      result = "backup";
     }
+
+    // Start sync if autoStartSync is enabled (sync was stopped during logout)
+    if (this.config.autoStartSync) {
+      this.startSync();
+    }
+
+    return result;
   }
 
   /**
@@ -381,8 +389,8 @@ export default class Ganon<T extends Record<string, any> & BaseStorageMapping> i
       this.stopSync();
       this.syncController.cancelPendingOperations();
 
-      // Clear current user identifier
-      this.storageManager.remove(this.config.identifierKey as Extract<keyof T, string>);
+      // Clear all data
+      this.clearAllData();
     }
   }
 

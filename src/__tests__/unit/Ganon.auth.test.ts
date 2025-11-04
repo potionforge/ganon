@@ -110,13 +110,60 @@ describe('Ganon auth lifecycle', () => {
     expect(mockSyncController.restore).not.toHaveBeenCalled();
   });
 
+  it('login: restarts sync when autoStartSync is enabled and restoring', async () => {
+    const configWithAutoSync: GanonConfig<TestStorage> = {
+      ...config,
+      autoStartSync: true,
+    };
+    ganon = new Ganon<TestStorage>(configWithAutoSync);
+    jest.clearAllMocks();
+
+    mockSyncController.hasAnyRemoteData.mockResolvedValue(true);
+    mockSyncController.restore.mockResolvedValue({
+      success: true,
+      restoredKeys: [],
+      failedKeys: [],
+      integrityFailures: [],
+      timestamp: new Date(),
+    });
+    const result = await ganon.login('u4@example.com');
+    expect(result).toBe('restore');
+    expect(mockSyncController.restore).toHaveBeenCalled();
+    expect(mockSyncController.startSyncInterval).toHaveBeenCalled();
+  });
+
+  it('login: restarts sync when autoStartSync is enabled and backing up', async () => {
+    const configWithAutoSync: GanonConfig<TestStorage> = {
+      ...config,
+      autoStartSync: true,
+    };
+    ganon = new Ganon<TestStorage>(configWithAutoSync);
+    jest.clearAllMocks();
+
+    mockSyncController.hasAnyRemoteData.mockResolvedValue(false);
+    mockSyncController.syncAll.mockResolvedValue({ success: true });
+    const result = await ganon.login('u5@example.com');
+    expect(result).toBe('backup');
+    expect(mockSyncController.syncAll).toHaveBeenCalled();
+    expect(mockSyncController.startSyncInterval).toHaveBeenCalled();
+  });
+
+  it('login: does not restart sync when autoStartSync is disabled', async () => {
+    mockSyncController.hasAnyRemoteData.mockResolvedValue(false);
+    mockSyncController.syncAll.mockResolvedValue({ success: true });
+    const result = await ganon.login('u6@example.com');
+    expect(result).toBe('backup');
+    expect(mockSyncController.syncAll).toHaveBeenCalled();
+    expect(mockSyncController.startSyncInterval).not.toHaveBeenCalled();
+  });
+
   it('logout: backs up by default, stops sync, cancels, and clears user', async () => {
     mockUserManager.isUserLoggedIn.mockReturnValue(true);
     await ganon.logout();
     expect(mockSyncController.syncAll).toHaveBeenCalled();
     expect(mockSyncController.cancelPendingOperations).toHaveBeenCalled();
     expect(mockSyncController.stopSyncInterval).toHaveBeenCalled();
-    expect(mockStorageManager.remove).toHaveBeenCalledWith('email');
+    expect(mockStorageManager.clearAllData).toHaveBeenCalled();
   });
 
   it('logout: can skip backup when option provided', async () => {
@@ -124,7 +171,8 @@ describe('Ganon auth lifecycle', () => {
     await ganon.logout({ backup: false });
     expect(mockSyncController.syncAll).not.toHaveBeenCalled();
     expect(mockSyncController.cancelPendingOperations).toHaveBeenCalled();
-    expect(mockStorageManager.remove).toHaveBeenCalledWith('email');
+    expect(mockSyncController.stopSyncInterval).toHaveBeenCalled();
+    expect(mockStorageManager.clearAllData).toHaveBeenCalled();
   });
 });
 
