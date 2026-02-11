@@ -47,7 +47,7 @@
     "@react-native-firebase/firestore": ">=21.0.0",
     "react": ">=17.0.0",
     "react-native": ">=0.72.0",
-    "react-native-mmkv": ">=3.0.0"
+    "react-native-mmkv": ">=2.12.2"
   },
   "dependencies": {
     "@types/crypto-js": "^4.2.2",
