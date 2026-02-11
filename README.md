@@ -230,6 +230,35 @@ async logout() {
 
 Every time the app is opened, GanonDB will automatically check the backend to see if something changed. If it did, it will hydrate those values.
 
+### Events
+
+You can subscribe to sync lifecycle events (e.g. to update root app state when automatic hydration finishes and any keys were restored).
+
+**Events:**
+
+| Event | When it fires | Payload |
+|-------|----------------|--------|
+| `hydrationComplete` | After any hydration finishes, including the automatic one when the app opens with a user logged in | `RestoreResult` (`restoredKeys`, `failedKeys`, `integrityFailures`, etc.) |
+| `syncComplete` | After a full backup completes (`ganon.backup()`) | `BackupResult` |
+| `restoreComplete` | After a full restore completes (`ganon.restore()`) | `RestoreResult` |
+
+**API:** `on(event, listener)`, `off(event, listener)`, `once(event, listener)`.
+
+**Example:**
+
+```ts
+ganon.on('hydrationComplete', (result) => {
+  if (result.restoredKeys.length > 0) {
+    // Update root state; some keys were hydrated from the cloud
+    updateAppState({ hydratedKeys: result.restoredKeys });
+  }
+});
+
+ganon.once('syncComplete', (result) => {
+  console.log('First backup done:', result.backedUpKeys);
+});
+```
+
 ### Conflict Resolution & Integrity Failure Handling
 
 Ganon provides robust systems to handle both data conflicts and integrity failures during synchronization.
@@ -384,6 +413,11 @@ import {
   RestoreResult,
   BackupResult,
 
+  // Events
+  GanonEventName,
+  GanonEventPayloadMap,
+  GanonEventListener,
+
   // Logging
   LogLevel
 } from '@potionforge/ganon';
@@ -401,6 +435,12 @@ import {
 * `IntegrityFailureRecoveryStrategy.USE_LOCAL` - Trust local data
 * `IntegrityFailureRecoveryStrategy.USE_REMOTE` - Trust remote data
 * `IntegrityFailureRecoveryStrategy.SKIP` - Skip problematic keys
+
+#### Event types
+
+* `GanonEventName` - `"hydrationComplete"` | `"syncComplete"` | `"restoreComplete"`
+* `GanonEventPayloadMap` - Maps each event name to its payload type (`RestoreResult` or `BackupResult`)
+* `GanonEventListener<N>` - Callback type for event `N`
 
 </details>
 

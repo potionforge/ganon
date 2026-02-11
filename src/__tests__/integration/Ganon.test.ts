@@ -38,6 +38,9 @@ describe('Ganon Integration Tests', () => {
       expect(typeof ganon.startSync).toBe('function');
       expect(typeof ganon.stopSync).toBe('function');
       expect(typeof ganon.isUserLoggedIn).toBe('function');
+      expect(typeof ganon.on).toBe('function');
+      expect(typeof ganon.off).toBe('function');
+      expect(typeof ganon.once).toBe('function');
       expect(typeof ganon.destroy).toBe('function');
     });
 

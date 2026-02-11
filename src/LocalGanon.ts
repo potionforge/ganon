@@ -5,6 +5,7 @@ import { BackupResult } from "./models/sync/BackupResult";
 import { RestoreResult } from "./models/sync/RestoreResult";
 import { ConflictResolutionConfig } from "./models/config/ConflictResolutionConfig";
 import { IntegrityFailureConfig } from "./models/config/IntegrityFailureConfig";
+import type { GanonEventName, GanonEventListener } from "./models/events/GanonEvents";
 import Log from "./utils/Log";
 import SyncError, { SyncErrorType } from "./errors/SyncError";
 
@@ -200,6 +201,15 @@ export default class LocalGanon<T extends Record<string, any> & BaseStorageMappi
     Log.info('LocalGanon: Clearing all data from local storage');
     this.storageManager.clearAllData();
   }
+
+  /** LOCAL ONLY: No-op; LocalGanon does not emit sync/hydration events. */
+  on<N extends GanonEventName>(_event: N, _listener: GanonEventListener<N>): void {}
+
+  /** LOCAL ONLY: No-op; LocalGanon does not emit sync/hydration events. */
+  off<N extends GanonEventName>(_event: N, _listener: GanonEventListener<N>): void {}
+
+  /** LOCAL ONLY: No-op; LocalGanon does not emit sync/hydration events. */
+  once<N extends GanonEventName>(_event: N, _listener: GanonEventListener<N>): void {}
 
   /**
    * Sets the log level for LocalGanon operations.

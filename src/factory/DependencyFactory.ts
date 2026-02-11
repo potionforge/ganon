@@ -6,7 +6,7 @@ import UserManager from "../managers/UserManager";
 import LocalMetadataManager from "../metadata/local/LocalMetadataManager";
 import MetadataCoordinatorRepo from "../metadata/MetadataCoordinatorRepo";
 import MetadataManager from "../metadata/MetadataManager";
-import { GanonConfig } from "../models/config/GanonConfig";
+import { InternalGanonConfig } from "../models/config/GanonConfig";
 import { BaseStorageMapping } from "../models/storage/BaseStorageMapping";
 import OperationRepo from "../sync/OperationRepo";
 import SyncController from "../sync/SyncController";
@@ -25,7 +25,7 @@ export default class DependencyFactory<T extends BaseStorageMapping> {
   private metadataManager: MetadataManager<T>;
   private userManager: UserManager<T>;
 
-  constructor(config: GanonConfig<T>) {
+  constructor(config: InternalGanonConfig<T>) {
     try {
       this.storageManager = new StorageManager<T>();
       this.userManager = new UserManager<T>(config.identifierKey, this.storageManager);

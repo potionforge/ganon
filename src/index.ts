@@ -13,6 +13,11 @@ export { SyncStatus } from './models/sync/SyncStatus';
 export type { BackupResult } from './models/sync/BackupResult';
 export type { RestoreResult, IntegrityFailureInfo } from './models/sync/RestoreResult';
 export type { IGanon } from './models/interfaces/IGanon';
+export type {
+  GanonEventName,
+  GanonEventPayloadMap,
+  GanonEventListener,
+} from './models/events/GanonEvents';
 export { default as SyncError, SyncErrorType, IntegrityFailureError } from './errors/SyncError';
 export * from './hooks/useGanon';
 import { LogLevel } from './utils/Log';
