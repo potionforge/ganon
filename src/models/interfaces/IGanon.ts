@@ -3,6 +3,7 @@ import { BackupResult } from "../sync/BackupResult";
 import { RestoreResult } from "../sync/RestoreResult";
 import { IntegrityFailureConfig } from "../config/IntegrityFailureConfig";
 import { ConflictResolutionConfig } from "../config/ConflictResolutionConfig";
+import type { GanonEventName, GanonEventListener } from "../events/GanonEvents";
 
 export interface IGanon<T extends BaseStorageMapping> {
   // Core CRUD operations with full type safety
@@ -21,6 +22,11 @@ export interface IGanon<T extends BaseStorageMapping> {
   forceHydrate(keys: Extract<keyof T, string>[], conflictConfig?: Partial<ConflictResolutionConfig>, integrityConfig?: Partial<IntegrityFailureConfig>): Promise<RestoreResult>;
   dangerouslyDelete(): Promise<void>;
   clearAllData(): void;
+
+  // Events
+  on<N extends GanonEventName>(event: N, listener: GanonEventListener<N>): void;
+  off<N extends GanonEventName>(event: N, listener: GanonEventListener<N>): void;
+  once<N extends GanonEventName>(event: N, listener: GanonEventListener<N>): void;
 
   // Logging operations
   setLogLevel(logLevel: number): void;

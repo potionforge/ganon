@@ -2,7 +2,7 @@ import StorageManager from "../managers/StorageManager";
 import FirestoreManager from "../firestore/FirestoreManager";
 import { ISyncController } from "../models/interfaces/ISyncController";
 import { BaseStorageMapping } from "../models/storage/BaseStorageMapping";
-import { GanonConfig } from "../models/config/GanonConfig";
+import { InternalGanonConfig } from "../models/config/GanonConfig";
 import { IntegrityFailureConfig } from "../models/config/IntegrityFailureConfig";
 import { ConflictResolutionConfig } from "../models/config/ConflictResolutionConfig";
 import { IntegrityFailureRecoveryStrategy } from "../models/config/IntegrityFailureRecoveryStrategy";
@@ -53,7 +53,7 @@ export default class SyncController<T extends BaseStorageMapping> implements ISy
     private metadataManager: MetadataManager<T>,
     private operationRepo: OperationRepo<T>,
     private userManager: UserManager<T>,
-    private config: GanonConfig<T>
+    private config: InternalGanonConfig<T>
   ) {
     Log.verbose('Ganon: SyncController.constructor');
 
@@ -403,6 +403,7 @@ export default class SyncController<T extends BaseStorageMapping> implements ISy
     Log.info('Ganon: hydrating...');
     if (!this.userManager.isUserLoggedIn()) {
       Log.info("Ganon: skipping hydrate because user is not logged in");
+      this.config.eventCallbacks?.onHydrationComplete?.(this._emptyRestoreResult);
       return this._emptyRestoreResult;
     }
 
@@ -533,6 +534,8 @@ export default class SyncController<T extends BaseStorageMapping> implements ISy
 
       const result = await this.hydrationPromise;
 
+      this.config.eventCallbacks?.onHydrationComplete?.(result);
+
       // After hydration completes, trigger a sync if there are pending operations
       if (this.hasPendingOperations()) {
         Log.info("Ganon: hydration complete, triggering sync for pending operations");
@@ -565,6 +568,7 @@ export default class SyncController<T extends BaseStorageMapping> implements ISy
     Log.info('Ganon: force hydrating...');
     if (!this.userManager.isUserLoggedIn()) {
       Log.info("Ganon: skipping force hydrate because user is not logged in");
+      this.config.eventCallbacks?.onHydrationComplete?.(this._emptyRestoreResult);
       return this._emptyRestoreResult;
     }
 
@@ -675,6 +679,8 @@ export default class SyncController<T extends BaseStorageMapping> implements ISy
       }, "force hydrate", keys, integrityConfig, conflictConfig);
 
       const result = await this.hydrationPromise;
+
+      this.config.eventCallbacks?.onHydrationComplete?.(result);
 
       // After hydration completes, trigger a sync if there are pending operations
       if (this.hasPendingOperations()) {

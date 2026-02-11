@@ -1,7 +1,7 @@
 import FirestoreManager from "./firestore/FirestoreManager";
 import StorageManager from "./managers/StorageManager";
 import NetworkMonitor from "./utils/NetworkMonitor";
-import { GanonConfig } from "./models/config/GanonConfig";
+import { GanonConfig, InternalGanonConfig } from "./models/config/GanonConfig";
 import { IntegrityFailureConfig } from "./models/config/IntegrityFailureConfig";
 import { IGanon } from "./models/interfaces/IGanon";
 import { BaseStorageMapping } from "./models/storage/BaseStorageMapping";
@@ -13,6 +13,11 @@ import SyncController from "./sync/SyncController";
 import DependencyFactory from "./factory/DependencyFactory";
 import UserManager from "./managers/UserManager";
 import { ConflictResolutionConfig } from "./models/config/ConflictResolutionConfig";
+import type {
+  GanonEventName,
+  GanonEventPayloadMap,
+  GanonEventListener,
+} from "./models/events/GanonEvents";
 
 export default class Ganon<T extends Record<string, any> & BaseStorageMapping> implements IGanon<T> {
   private storageManager: StorageManager<T>;
@@ -24,12 +29,25 @@ export default class Ganon<T extends Record<string, any> & BaseStorageMapping> i
   private isDestroyed: boolean = false;
   private isInitialized: boolean = false;
 
+  private readonly _listeners = new Map<
+    GanonEventName,
+    Set<GanonEventListener<GanonEventName>>
+  >();
+
   constructor(readonly config: GanonConfig<T>) {
     this._validateConfig(config);
 
     if (config.logLevel !== undefined) {
       Log.setLogLevel(config.logLevel);
     }
+
+    // Internal config with event callbacks; not exposed on public config
+    const internalConfig: InternalGanonConfig<T> = {
+      ...config,
+      eventCallbacks: {
+        onHydrationComplete: (result) => this._emit("hydrationComplete", result),
+      },
+    };
 
     // Set up global unhandled promise rejection handler (only once)
     if (!Ganon.unhandledRejectionHandlerSet) {
@@ -39,7 +57,7 @@ export default class Ganon<T extends Record<string, any> & BaseStorageMapping> i
 
     // Initialize all dependencies through the factory
     try {
-      const dependencyFactory = new DependencyFactory<T>(config);
+      const dependencyFactory = new DependencyFactory<T>(internalConfig);
       const {
         storageManager,
         syncController,
@@ -171,7 +189,9 @@ export default class Ganon<T extends Record<string, any> & BaseStorageMapping> i
   async backup(): Promise<BackupResult> {
     Log.info('Ganon: Backing up all data to the cloud');
     try {
-      return await this.syncController.syncAll();
+      const result = await this.syncController.syncAll();
+      this._emit("syncComplete", result);
+      return result;
     } catch (error) {
       if (error instanceof SyncError) {
         throw error; // Already properly typed error
@@ -191,6 +211,7 @@ export default class Ganon<T extends Record<string, any> & BaseStorageMapping> i
   async restore(): Promise<RestoreResult> {
     Log.info('Ganon: Restoring all data from the cloud');
     const result = await this.syncController.restore();
+    this._emit("restoreComplete", result);
     Log.info(`✅ Ganon: Restored ${result.restoredKeys.length} keys`);
     if (result.failedKeys.length > 0) {
       Log.error(`❌ Ganon: Failed to restore ${result.failedKeys.length} keys: ${result.failedKeys.join(', ')}`);
@@ -416,6 +437,8 @@ export default class Ganon<T extends Record<string, any> & BaseStorageMapping> i
         this.networkMonitor.destroy();
       }
 
+      this._listeners.clear();
+
       // Mark as destroyed
       this.isDestroyed = true;
     } catch (error) {
@@ -423,6 +446,51 @@ export default class Ganon<T extends Record<string, any> & BaseStorageMapping> i
       // Still mark as destroyed even if cleanup fails
       this.isDestroyed = true;
     }
+  }
+
+  /**
+   * Subscribe to a Ganon event. Use this to react to hydration, sync, or restore completion
+   * (e.g. update root app state when automatic hydration finishes and any keys were restored).
+   *
+   * @param event - Event name: `hydrationComplete` | `syncComplete` | `restoreComplete`
+   * @param listener - Callback receiving the event payload
+   */
+  on<N extends GanonEventName>(
+    event: N,
+    listener: GanonEventListener<N>
+  ): void {
+    if (this.isDestroyed) return;
+    let set = this._listeners.get(event);
+    if (!set) {
+      set = new Set();
+      this._listeners.set(event, set);
+    }
+    set.add(listener as GanonEventListener<GanonEventName>);
+  }
+
+  /**
+   * Unsubscribe a previously added listener.
+   */
+  off<N extends GanonEventName>(
+    event: N,
+    listener: GanonEventListener<N>
+  ): void {
+    const set = this._listeners.get(event);
+    if (set) set.delete(listener as GanonEventListener<GanonEventName>);
+  }
+
+  /**
+   * Subscribe to a Ganon event once; the listener is removed after the first invocation.
+   */
+  once<N extends GanonEventName>(
+    event: N,
+    listener: GanonEventListener<N>
+  ): void {
+    const wrapped: GanonEventListener<N> = (payload) => {
+      this.off(event, wrapped);
+      listener(payload);
+    };
+    this.on(event, wrapped);
   }
 
   /* P R I V A T E */
@@ -473,6 +541,21 @@ export default class Ganon<T extends Record<string, any> & BaseStorageMapping> i
         // Don't re-throw to prevent crash
       });
     }
+  }
+
+  private _emit<N extends GanonEventName>(
+    event: N,
+    payload: GanonEventPayloadMap[N]
+  ): void {
+    const set = this._listeners.get(event);
+    if (!set) return;
+    set.forEach((listener) => {
+      try {
+        listener(payload);
+      } catch (err) {
+        Log.error(`Ganon: event listener error (${event}): ${err}`);
+      }
+    });
   }
 
   private _validateConfig(config: GanonConfig<T>): void {

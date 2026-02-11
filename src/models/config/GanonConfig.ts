@@ -3,6 +3,8 @@ import { CloudBackupConfig } from "./CloudBackupConfig";
 import { BaseStorageMapping } from "../storage/BaseStorageMapping";
 import { IntegrityFailureConfig } from "./IntegrityFailureConfig";
 import { ConflictResolutionConfig } from "./ConflictResolutionConfig";
+import type { BackupResult } from "../sync/BackupResult";
+import type { RestoreResult } from "../sync/RestoreResult";
 
 /**
  * Main configuration interface for Ganon synchronization system.
@@ -63,4 +65,16 @@ export interface GanonConfig<T extends BaseStorageMapping> {
    * If not specified, uses default values from _conflictResolutionConfig.
    */
   conflictResolutionConfig?: Partial<ConflictResolutionConfig>;
+}
+
+/**
+ * Internal config type used only when wiring Ganon → DependencyFactory → SyncController.
+ * Extends the public config with event callbacks. Not part of the public API.
+ */
+export interface InternalGanonConfig<T extends BaseStorageMapping> extends GanonConfig<T> {
+  eventCallbacks?: {
+    onHydrationComplete?: (result: RestoreResult) => void;
+    onSyncComplete?: (result: BackupResult) => void;
+    onRestoreComplete?: (result: RestoreResult) => void;
+  };
 }
