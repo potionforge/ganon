@@ -589,68 +589,93 @@ export default class FirestoreManager<T extends BaseStorageMapping> implements I
     Log.info(`🗑️ Ganon FirestoreManager: Backup collection path: ${backupRef.path}`);
 
     try {
-      // Always attempt to delete the user document first
-      // This will cascade delete all subcollections if the document exists
+      // Firestore does NOT delete subcollections when a parent document is deleted; paths like
+      // users/{id}/backup/user/moodHistory/chunk_0 would remain as orphans. Delete configured
+      // subcollections (e.g. chunk docs) and backup documents first, then the user document.
+      await this._deleteEntireBackupTree(backupRef);
       await this.adapter.deleteDocument(userRef);
-      Log.info('✅ Ganon FirestoreManager: Successfully deleted user document and all subcollections');
+      Log.info('✅ Ganon FirestoreManager: Successfully deleted backup data and user document');
     } catch (error) {
-      Log.warn(`⚠️ Ganon FirestoreManager: Could not delete user document: ${error}`);
-
-      // If user document deletion fails (e.g., document doesn't exist),
-      // fall back to deleting the backup collection directly
-      try {
-        const snapshot = await this.adapter.getCollection(backupRef);
-        if (snapshot.empty) {
-          Log.info('✅ Ganon FirestoreManager: Backup collection is already empty');
-          return;
-        }
-
-        const batch = this.adapter.writeBatch();
-        let hasDeletions = false;
-
-        snapshot.docs.forEach(doc => {
-          if (doc && doc.ref) {
-            batch.delete(doc.ref);
-            hasDeletions = true;
-          }
-        });
-
-        if (hasDeletions) {
-          await batch.commit();
-          Log.info(`✅ Ganon FirestoreManager: Deleted ${snapshot.size} documents from backup collection`);
-        }
-      } catch (fallbackError) {
-        Log.error(`❌ Ganon FirestoreManager: Fallback deletion also failed: ${fallbackError}`);
-
-        // Check for specific Firestore errors in the fallback
-        if (fallbackError && typeof fallbackError === 'object' && 'code' in fallbackError) {
-          const firestoreError = fallbackError as { code: string; message: string };
-
-          switch (firestoreError.code) {
-            case 'permission-denied':
-              throw new SyncError(
-                'Permission denied for dangerous delete operation',
-                SyncErrorType.SyncNetworkError
-              );
-            case 'unavailable':
-            case 'deadline-exceeded':
-              throw new SyncError(
-                'Network timeout during dangerous delete operation',
-                SyncErrorType.SyncTimeout
-              );
-            default:
-              throw new SyncError(
-                `Firestore error during dangerous delete: ${firestoreError.message}`,
-                SyncErrorType.SyncNetworkError
-              );
-          }
-        }
-
-        throw new SyncError(
-          `Dangerous delete operation failed: ${fallbackError}`,
-          SyncErrorType.SyncFailed
-        );
+      if (error instanceof SyncError) {
+        throw error;
       }
+
+      if (error && typeof error === 'object' && 'code' in error) {
+        const firestoreError = error as { code: string; message: string };
+
+        switch (firestoreError.code) {
+          case 'permission-denied':
+            throw new SyncError(
+              'Permission denied for dangerous delete operation',
+              SyncErrorType.SyncNetworkError
+            );
+          case 'unavailable':
+          case 'deadline-exceeded':
+            throw new SyncError(
+              'Network timeout during dangerous delete operation',
+              SyncErrorType.SyncTimeout
+            );
+          default:
+            throw new SyncError(
+              `Firestore error during dangerous delete: ${firestoreError.message}`,
+              SyncErrorType.SyncNetworkError
+            );
+        }
+      }
+
+      throw new SyncError(
+        `Dangerous delete operation failed: ${error}`,
+        SyncErrorType.SyncFailed
+      );
+    }
+  }
+
+  /**
+   * Deletes all documents in a collection in batches of 500 (Firestore batch limit).
+   */
+  private async _deleteAllDocumentsInCollection(
+    collectionRef: FirebaseFirestoreTypes.CollectionReference
+  ): Promise<void> {
+    const snapshot = await this.adapter.getCollection(collectionRef);
+    if (snapshot.empty) {
+      return;
+    }
+    const BATCH = 500;
+    for (let i = 0; i < snapshot.docs.length; i += BATCH) {
+      const batch = this.adapter.writeBatch();
+      const slice = snapshot.docs.slice(i, i + BATCH);
+      slice.forEach(d => batch.delete(d.ref));
+      await batch.commit();
+    }
+  }
+
+  /**
+   * Removes everything under users/{id}/backup using cloudConfig (subcollections, then each
+   * backup document), then any leftover top-level backup documents not listed in config.
+   */
+  private async _deleteEntireBackupTree(
+    backupRef: FirebaseFirestoreTypes.CollectionReference
+  ): Promise<void> {
+    for (const [documentName, config] of Object.entries(this.cloudConfig)) {
+      const docRef = this.referenceManager.getDocumentRef(backupRef, documentName);
+      for (const subKey of config.subcollectionKeys ?? []) {
+        const subColRef = this.referenceManager.getCollectionRef(docRef, subKey);
+        Log.verbose(`🗑️ Ganon FirestoreManager: Deleting subcollection ${subColRef.path}`);
+        await this._deleteAllDocumentsInCollection(subColRef);
+      }
+      Log.verbose(`🗑️ Ganon FirestoreManager: Deleting backup document ${docRef.path}`);
+      await this.adapter.deleteDocument(docRef);
+    }
+
+    const leftover = await this.adapter.getCollection(backupRef);
+    if (leftover.empty) {
+      return;
+    }
+    Log.warn(
+      `🗑️ Ganon FirestoreManager: Removing ${leftover.size} backup document(s) not present in cloudConfig`
+    );
+    for (const d of leftover.docs) {
+      await this.adapter.deleteDocument(d.ref);
     }
   }
 

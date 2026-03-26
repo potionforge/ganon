@@ -1367,80 +1367,33 @@ describe('FirestoreManager', () => {
       mockUserManager.getCurrentUser.mockReturnValue('test-user');
     });
 
-    it('should delete the entire user document when it exists', async () => {
+    it('should delete configured backup tree then user document', async () => {
       mockUserManager.isUserLoggedIn.mockReturnValue(true);
       mockUserManager.getCurrentUser.mockReturnValue('test-user');
-      const mockUserRef = mockDoc;
+      const mockUserRef = { path: 'users/test-user' } as FirebaseFirestoreTypes.DocumentReference;
+      const mockBackupRef = { path: 'users/test-user/backup' } as FirebaseFirestoreTypes.CollectionReference;
+
       jest.spyOn(firestoreManager['referenceManager'], 'getUserRef').mockReturnValue(mockUserRef);
+      jest.spyOn(firestoreManager['referenceManager'], 'getBackupRef').mockReturnValue(mockBackupRef);
+      jest.spyOn(firestoreManager['referenceManager'], 'getDocumentRef').mockImplementation((backupRef, name) => ({
+        path: `${backupRef.path}/${name}`,
+      } as FirebaseFirestoreTypes.DocumentReference));
+      jest.spyOn(firestoreManager['referenceManager'], 'getCollectionRef').mockImplementation((docRef, key) => ({
+        path: `${docRef.path}/${key}`,
+      } as FirebaseFirestoreTypes.CollectionReference));
+
       mockAdapter.deleteDocument.mockResolvedValue(undefined);
-      await firestoreManager.dangerouslyDelete();
-      expect(mockAdapter.deleteDocument).toHaveBeenCalledWith(mockUserRef);
-    });
-
-    it('should fall back to deleting backup collection when user document does not exist', async () => {
-      mockUserManager.isUserLoggedIn.mockReturnValue(true);
-      mockUserManager.getCurrentUser.mockReturnValue('test-user');
-      const mockUserRef = mockDoc;
-      const mockBackupRef = mockCollection;
-      jest.spyOn(firestoreManager['referenceManager'], 'getUserRef').mockReturnValue(mockUserRef);
-      jest.spyOn(firestoreManager['referenceManager'], 'getBackupRef').mockReturnValue(mockBackupRef);
-      const error = new Error('Document not found');
-      mockAdapter.deleteDocument.mockRejectedValue(error);
-      const mockDocs = [
-        {
-          ref: mockDoc,
-          exists: true,
-          data: () => ({}),
-          id: 'doc1',
-          metadata: { fromCache: false, hasPendingWrites: false },
-          get: jest.fn(),
-          isEqual: jest.fn(),
-        },
-        {
-          ref: mockDoc,
-          exists: true,
-          data: () => ({}),
-          id: 'doc2',
-          metadata: { fromCache: false, hasPendingWrites: false },
-          get: jest.fn(),
-          isEqual: jest.fn(),
-        },
-      ] as unknown as FirebaseFirestoreTypes.QueryDocumentSnapshot[];
-      mockCollectionSnap.docs = mockDocs;
-      const mockBatch = {
-        set: jest.fn(),
-        delete: jest.fn(),
-        update: jest.fn(),
-        commit: jest.fn().mockResolvedValue(undefined),
-      };
-      mockAdapter.writeBatch.mockReturnValue(mockBatch);
-      await firestoreManager.dangerouslyDelete();
-      expect(mockAdapter.deleteDocument).toHaveBeenCalledWith(mockUserRef);
-      expect(mockAdapter.getCollection).toHaveBeenCalledWith(mockBackupRef);
-      expect(mockAdapter.writeBatch).toHaveBeenCalled();
-      expect(mockBatch.delete).toHaveBeenCalledTimes(2);
-      expect(mockBatch.commit).toHaveBeenCalled();
-    });
-
-    it('should handle empty backup collection in fallback', async () => {
-      mockUserManager.isUserLoggedIn.mockReturnValue(true);
-      mockUserManager.getCurrentUser.mockReturnValue('test-user');
-      const mockUserRef = mockDoc;
-      const mockBackupRef = mockCollection;
-      jest.spyOn(firestoreManager['referenceManager'], 'getUserRef').mockReturnValue(mockUserRef);
-      jest.spyOn(firestoreManager['referenceManager'], 'getBackupRef').mockReturnValue(mockBackupRef);
-      const error = new Error('Document not found');
-      mockAdapter.deleteDocument.mockRejectedValue(error);
       mockCollectionSnap.docs = [];
       mockCollectionSnap.empty = true;
-      mockAdapter.writeBatch.mockClear();
+
       await firestoreManager.dangerouslyDelete();
-      expect(mockAdapter.deleteDocument).toHaveBeenCalledWith(mockUserRef);
-      expect(mockAdapter.getCollection).toHaveBeenCalledWith(mockBackupRef);
-      expect(mockAdapter.writeBatch).not.toHaveBeenCalled();
+
+      const lastDeleteRef = mockAdapter.deleteDocument.mock.calls[mockAdapter.deleteDocument.mock.calls.length - 1][0];
+      expect((lastDeleteRef as FirebaseFirestoreTypes.DocumentReference).path).toBe('users/test-user');
+      expect(mockAdapter.getCollection).toHaveBeenCalled();
     });
 
-    it('should handle errors during fallback deletion', async () => {
+    it('should handle errors during backup tree deletion', async () => {
       mockUserManager.isUserLoggedIn.mockReturnValue(true);
       mockUserManager.getCurrentUser.mockReturnValue('test-user');
       const mockUserRef = mockDoc;
