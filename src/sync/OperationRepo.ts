@@ -107,7 +107,11 @@ export default class OperationRepo<T extends BaseStorageMapping> {
       const operations = Array.from(this._pendingOperations.values())
         .filter((op): op is BaseSyncOperation<T> => op instanceof BaseSyncOperation)
         .map(op => op.serialize());
-      this._storage.set(PENDING_OPERATIONS_KEY, JSON.stringify(operations));
+      if (operations.length === 0) {
+        this._storage.delete(PENDING_OPERATIONS_KEY);
+      } else {
+        this._storage.set(PENDING_OPERATIONS_KEY, JSON.stringify(operations));
+      }
     } catch (error) {
       Log.error('Ganon: Error saving pending operations: ' + String(error));
     }
@@ -247,6 +251,7 @@ export default class OperationRepo<T extends BaseStorageMapping> {
       }
     } finally {
       this._syncInProgress = false;
+      this._savePendingOperations();
     }
 
     return results;
