@@ -268,6 +268,23 @@ describe('OperationRepo', () => {
       const secondResults = await operationRepo.processOperations();
       expect(secondResults).toHaveLength(0);
     });
+
+    it('should remove synced operations from storage so they are not re-synced on reload', async () => {
+      const setOp = new SetOperation('testKey1', mockDeps.storage, mockDeps.firestore, mockDeps.metadataManager);
+      operationRepo.addOperation('testKey1', setOp);
+
+      expect(mockStorage.getString('ganon_pending_operations')).toBeDefined();
+
+      const results = await operationRepo.processOperations();
+      expect(results).toHaveLength(1);
+      expect(results[0].success).toBe(true);
+
+      expect(mockStorage.getString('ganon_pending_operations')).toBeUndefined();
+
+      const reloadedRepo = new OperationRepo<TestStorageMapping>(mockNetworkMonitor, mockDeps);
+      const reloadResults = await reloadedRepo.processOperations();
+      expect(reloadResults).toHaveLength(0);
+    });
   });
 
   describe('storage persistence', () => {
