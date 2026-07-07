@@ -10,6 +10,7 @@
     "require": "./dist/index.cjs"
   },
   "scripts": {
+    "copydiff": "bash scripts/copydiff.sh",
     "test": "jest",
     "build": "pnpm test && tsup",
     "prepare": "pnpm run build"
