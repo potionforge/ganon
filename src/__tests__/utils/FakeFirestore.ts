@@ -134,6 +134,8 @@ export class FakeFirestore {
     data: DocData,
     options?: FirebaseFirestoreTypes.SetOptions
   ): Promise<void> {
+    // Firestore set(data, { merge: true }) deep-merges nested maps (e.g. digestMap siblings
+    // are preserved). Shallow replacement only happens with update() or mergeFields.
     if (options?.merge) {
       const existing = this.documents.get(ref.path) || {};
       this.documents.set(ref.path, deepMerge(existing, data));
