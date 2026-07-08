@@ -109,7 +109,8 @@ export default class SyncEngine<T extends BaseStorageMapping> implements ISyncEn
    * it. Flushing here would route through recordLocalChange -> flushQueue.enqueue and
    * re-arm a remote flush against the session being torn down (the hazard this method
    * exists to prevent), so a bare stop() intentionally drops unflushed marks. Callers
-   * that need those writes must flush before stop() (logout() does so via backup()).
+   * that need recent edits captured should run backup()/syncAll() first — syncAll
+   * synchronously flushes pending marks before processOperations().
    */
   stop(): void {
     Log.verbose('Ganon: SyncEngine.stop');
@@ -287,12 +288,24 @@ export default class SyncEngine<T extends BaseStorageMapping> implements ISyncEn
       this._markDebounceHandle.cancel();
     }
     this._markDebounceHandle = this.scheduler.schedule(() => {
-      const keys = Array.from(this._pendingMarkKeys);
-      this._pendingMarkKeys.clear();
-      keys.forEach((pendingKey) => {
-        this._processMarkAsPending(pendingKey);
-      });
+      this._flushPendingMarks();
     }, this._MARK_DEBOUNCE_DELAY);
+  }
+
+  /** Cancel debounced markAsPending and process accumulated keys synchronously. */
+  private _flushPendingMarks(): void {
+    if (this._markDebounceHandle) {
+      this._markDebounceHandle.cancel();
+      this._markDebounceHandle = null;
+    }
+    if (this._pendingMarkKeys.size === 0) {
+      return;
+    }
+    const keys = Array.from(this._pendingMarkKeys);
+    this._pendingMarkKeys.clear();
+    keys.forEach((pendingKey) => {
+      this._processMarkAsPending(pendingKey);
+    });
   }
 
   private _processMarkAsPending(key: Extract<keyof T, string>): void {
@@ -412,6 +425,10 @@ export default class SyncEngine<T extends BaseStorageMapping> implements ISyncEn
           }
         }
       }
+
+      // syncAll is an explicit "backup everything now" — flush debounced marks before
+      // processOperations so logout's backup() cannot race the ~50ms mark window.
+      this._flushPendingMarks();
 
       const results = await this.operationRepo.processOperations();
 

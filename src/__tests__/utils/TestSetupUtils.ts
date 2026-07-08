@@ -57,6 +57,9 @@ export function createMockFirestoreManager<T extends BaseStorageMapping>(): jest
       await (mock as any).backup(key, value, { digest: 'mock-digest', version: 1 });
     }),
     writeValueWithDigest: jest.fn().mockResolvedValue(undefined),
+    backupLastBackupToUserDocument: jest.fn<
+      (timestamp: number, options?: { transaction?: any }) => Promise<void>
+    >().mockResolvedValue(undefined),
     dangerouslyDelete: jest.fn<() => Promise<void>>().mockResolvedValue(undefined),
     _backupDocumentField: async () => {},
     _backupSubcollection: async () => {},
