@@ -18,9 +18,16 @@ class MockDocumentReference implements DocumentReference {
 }
 
 class MockCollectionReference implements CollectionReference {
-  constructor(public path: string) {}
+  parent?: MockDocumentReference;
+
+  constructor(public path: string, parent?: MockDocumentReference) {
+    this.parent = parent;
+  }
   get id() {
     return this.path.split('/').pop() || '';
+  }
+  doc(id: string) {
+    return new MockDocumentReference(`${this.path}/${id}`);
   }
 }
 
@@ -55,6 +62,25 @@ class MockStore {
   }
 }
 
+function deepMerge(target: Record<string, any>, source: Record<string, any>): Record<string, any> {
+  const result = { ...target };
+  for (const [key, value] of Object.entries(source)) {
+    if (
+      value !== null &&
+      typeof value === 'object' &&
+      !Array.isArray(value) &&
+      result[key] !== null &&
+      typeof result[key] === 'object' &&
+      !Array.isArray(result[key])
+    ) {
+      result[key] = deepMerge(result[key], value);
+    } else {
+      result[key] = value;
+    }
+  }
+  return result;
+}
+
 const mockStore = new MockStore();
 
 function isReference(obj: any): obj is { path: string } {
@@ -62,14 +88,26 @@ function isReference(obj: any): obj is { path: string } {
 }
 
 const mockFirestore = {
-  collection: (path: string | { path: string }, ...pathSegments: string[]) => {
-    const basePath = isReference(path) ? path.path : path;
-    const fullPath = [basePath, ...pathSegments].join('/');
-    return new MockCollectionReference(fullPath);
+  collection: (pathOrFirestore: any, ...pathSegments: string[]) => {
+    const segments =
+      typeof pathOrFirestore === 'string' || isReference(pathOrFirestore)
+        ? [isReference(pathOrFirestore) ? pathOrFirestore.path : pathOrFirestore, ...pathSegments]
+        : pathSegments;
+    const fullPath = segments.filter(Boolean).join('/');
+    const parentDoc =
+      isReference(pathOrFirestore) && pathSegments.length > 0
+        ? pathOrFirestore instanceof MockDocumentReference
+          ? pathOrFirestore
+          : new MockDocumentReference(pathOrFirestore.path)
+        : undefined;
+    return new MockCollectionReference(fullPath, parentDoc);
   },
-  doc: (path: string | { path: string }, ...pathSegments: string[]) => {
-    const basePath = isReference(path) ? path.path : path;
-    const fullPath = [basePath, ...pathSegments].join('/');
+  doc: (pathOrFirestore: any, ...pathSegments: string[]) => {
+    const segments =
+      typeof pathOrFirestore === 'string' || isReference(pathOrFirestore)
+        ? [isReference(pathOrFirestore) ? pathOrFirestore.path : pathOrFirestore, ...pathSegments]
+        : pathSegments;
+    const fullPath = segments.filter(Boolean).join('/');
     return new MockDocumentReference(fullPath);
   },
   getDoc: async (ref: DocumentReference) => {
@@ -87,8 +125,13 @@ const mockFirestore = {
       docs,
     };
   },
-  setDoc: async (ref: DocumentReference, data: any) => {
-    mockStore.set(ref.path, data);
+  setDoc: async (ref: DocumentReference, data: any, options?: { merge?: boolean }) => {
+    if (options?.merge) {
+      const existing = mockStore.get(ref.path) || {};
+      mockStore.set(ref.path, deepMerge(existing, data));
+    } else {
+      mockStore.set(ref.path, data);
+    }
   },
   deleteDoc: async (ref: DocumentReference) => {
     mockStore.delete(ref.path);
@@ -104,6 +147,34 @@ const mockFirestore = {
   },
   query: () => ({}),
   deleteField: () => ({}),
+  runTransaction: async <T>(
+    _firestore: unknown,
+    updateFunction: (transaction: {
+      get: (ref: DocumentReference) => Promise<{ exists: boolean; data: () => any }>;
+      set: (ref: DocumentReference, data: any, options?: { merge?: boolean }) => Promise<void>;
+      update: (ref: DocumentReference, data: any) => Promise<void>;
+      delete: (ref: DocumentReference) => Promise<void>;
+    }) => Promise<T>
+  ): Promise<T> => {
+    const pendingSets: Array<{ ref: DocumentReference; data: any; options?: { merge?: boolean } }> = [];
+    const transaction = {
+      get: async (ref: DocumentReference) => mockFirestore.getDoc(ref),
+      set: async (ref: DocumentReference, data: any, options?: { merge?: boolean }) => {
+        pendingSets.push({ ref, data, options });
+      },
+      update: async (ref: DocumentReference, data: any) => {
+        pendingSets.push({ ref, data, options: { merge: true } });
+      },
+      delete: async (ref: DocumentReference) => {
+        mockStore.delete(ref.path);
+      },
+    };
+    const result = await updateFunction(transaction);
+    for (const { ref, data, options } of pendingSets) {
+      await mockFirestore.setDoc(ref, data, options);
+    }
+    return result;
+  },
 };
 
 // Export everything
@@ -116,6 +187,7 @@ export const deleteDoc = mockFirestore.deleteDoc;
 export const writeBatch = mockFirestore.writeBatch;
 export const query = mockFirestore.query;
 export const deleteField = mockFirestore.deleteField;
+export const runTransaction = mockFirestore.runTransaction;
 export const getFirestore = () => mockFirestore;
 
 // Export types for use in tests

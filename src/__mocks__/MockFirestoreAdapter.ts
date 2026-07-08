@@ -4,6 +4,25 @@ import {
 
 import IFirestoreAdapter from '../models/interfaces/IFirestoreAdapter';
 
+function deepMerge(target: Record<string, any>, source: Record<string, any>): Record<string, any> {
+  const result = { ...target };
+  for (const [key, value] of Object.entries(source)) {
+    if (
+      value !== null &&
+      typeof value === 'object' &&
+      !Array.isArray(value) &&
+      result[key] !== null &&
+      typeof result[key] === 'object' &&
+      !Array.isArray(result[key])
+    ) {
+      result[key] = deepMerge(result[key], value);
+    } else {
+      result[key] = value;
+    }
+  }
+  return result;
+}
+
 /**
  * A mock implementation of FirestoreAdapter for testing purposes.
  * Stores data in memory and provides methods to inspect the stored data.
@@ -51,7 +70,7 @@ export class MockFirestoreAdapter implements IFirestoreAdapter {
 
     if (options?.merge) {
       const existingData = this.documents.get(path) || {};
-      this.documents.set(path, { ...existingData, ...data });
+      this.documents.set(path, deepMerge(existingData, data));
     } else {
       this.documents.set(path, data);
     }
@@ -65,7 +84,7 @@ export class MockFirestoreAdapter implements IFirestoreAdapter {
   async updateDocument(ref: FirebaseFirestoreTypes.DocumentReference, data: any): Promise<void> {
     const path = ref.path;
     const existingData = this.documents.get(path) || {};
-    this.documents.set(path, { ...existingData, ...data });
+    this.documents.set(path, deepMerge(existingData, data));
   }
 
   /**
