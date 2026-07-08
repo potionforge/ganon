@@ -217,7 +217,7 @@ Use `whenHydrated()` to await the post-login hydration cycle, and `getOrDefault(
 | API / config | Purpose |
 |---|---|
 | `getOrDefault(key, fallback)` | Read without persisting synthesized defaults (I1) |
-| `whenHydrated()` | Resolves when Ganon's hydration settles for the current login cycle (consumer post-login merges may not have applied yet) |
+| `whenHydrated()` | Resolves with `'hydrated'`, `'logged-out'`, or `'login-failed'` when Ganon's hydration cycle settles (consumer post-login merges may not have applied yet) |
 | `earlyWriteGuard` | `'off'` (default), `'warn'`, or `'throw'` for post-login pre-hydration writes |
 | `digestReadMode` | `'dual'` (default): higher-version read across in-document `digestMap` + legacy map; `'v2'`: in-document only; `'legacy'`: legacy map only |
 

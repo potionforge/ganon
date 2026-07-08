@@ -8,6 +8,7 @@ import { IntegrityFailureConfig } from "./models/config/IntegrityFailureConfig";
 import type { GanonEventName, GanonEventListener } from "./models/events/GanonEvents";
 import Log from "./utils/Log";
 import SyncError, { SyncErrorType } from "./errors/SyncError";
+import type { HydrationWaitReason } from "./models/sync/HydrationWaitReason";
 
 /**
  * Simplified configuration for LocalGanon that only requires an identifier key
@@ -68,8 +69,8 @@ export default class LocalGanon<T extends Record<string, any> & BaseStorageMappi
     this.clearAllData();
   }
 
-  whenHydrated(): Promise<void> {
-    return Promise.resolve();
+  whenHydrated(): Promise<HydrationWaitReason> {
+    return Promise.resolve('hydrated');
   }
 
   /**

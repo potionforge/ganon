@@ -21,6 +21,7 @@ import type {
 } from "./models/events/GanonEvents";
 import KeyRouter from "./routing/KeyRouter";
 import { METADATA_KEY, DIGEST_MAP_KEY, REMOTE_METADATA_KEY } from "./constants";
+import type { HydrationWaitReason } from "./models/sync/HydrationWaitReason";
 
 export default class Ganon<T extends Record<string, any> & BaseStorageMapping> implements IGanon<T> {
   private storageManager: StorageManager<T>;
@@ -32,7 +33,7 @@ export default class Ganon<T extends Record<string, any> & BaseStorageMapping> i
   private keyRouter: KeyRouter<T>;
   private isDestroyed: boolean = false;
   private isInitialized: boolean = false;
-  private hydrationWaiters: Array<{ resolve: () => void; cycle: number }> = [];
+  private hydrationWaiters: Array<{ resolve: (reason: HydrationWaitReason) => void; cycle: number }> = [];
   private hydrationCycle = 0;
   private hydrationSettled = true;
   private readonly resolvedConfig: ResolvedGanonConfig<T>;
@@ -152,9 +153,11 @@ export default class Ganon<T extends Record<string, any> & BaseStorageMapping> i
   /**
    * Resolves when Ganon's hydration settles for the current login cycle.
    * Pending before first login; waiters resolve on logout; fresh pending per new login.
-   * Resolves when Ganon's hydration settles — consumer-side post-login merges may not have applied yet.
+   * Resolves with `'hydrated'` when Ganon's hydration settles, `'logged-out'` if logout
+   * resolved the waiter first, or `'login-failed'` if `login()` threw after beginning the
+   * hydration cycle. Consumer-side post-login merges may not have applied yet.
    */
-  whenHydrated(): Promise<void> {
+  whenHydrated(): Promise<HydrationWaitReason> {
     if (this.isDestroyed) {
       return Promise.reject(
         new SyncError('Cannot perform operation: Ganon instance has been destroyed', SyncErrorType.SyncConfigurationError)
@@ -166,7 +169,7 @@ export default class Ganon<T extends Record<string, any> & BaseStorageMapping> i
       });
     }
     if (!this._isHydrationPending()) {
-      return Promise.resolve();
+      return Promise.resolve('hydrated');
     }
     return new Promise(resolve => {
       this.hydrationWaiters.push({ resolve, cycle: this.hydrationCycle });
@@ -454,7 +457,7 @@ export default class Ganon<T extends Record<string, any> & BaseStorageMapping> i
 
       return result;
     } catch (error) {
-      this._settleHydrationWaiters();
+      this._settleHydrationWaiters('login-failed');
       throw error;
     }
   }
@@ -576,19 +579,19 @@ export default class Ganon<T extends Record<string, any> & BaseStorageMapping> i
     this.hydrationSettled = false;
   }
 
-  private _settleHydrationWaiters(): void {
+  private _settleHydrationWaiters(reason: HydrationWaitReason = 'hydrated'): void {
     this.hydrationSettled = true;
     const cycle = this.hydrationCycle;
     const waiters = this.hydrationWaiters.filter(w => w.cycle === cycle || w.cycle === 0);
     this.hydrationWaiters = this.hydrationWaiters.filter(w => w.cycle !== cycle && w.cycle !== 0);
-    waiters.forEach(w => w.resolve());
+    waiters.forEach(w => w.resolve(reason));
   }
 
   /** Resolve pending waiters on logout so promises never dangle across sessions. */
   private _resolveHydrationWaitersOnLogout(): void {
     const waiters = [...this.hydrationWaiters];
     this.hydrationWaiters = [];
-    waiters.forEach(w => w.resolve());
+    waiters.forEach(w => w.resolve('logged-out'));
   }
 
   private _resetHydrationCycle(): void {
