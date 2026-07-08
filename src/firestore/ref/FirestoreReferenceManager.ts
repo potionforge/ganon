@@ -117,6 +117,7 @@ export default class FirestoreReferenceManager<T extends BaseStorageMapping> imp
         const docRef = this.getDocumentRef(backupRef, documentName);
         const config = this.cloudConfig[documentName];
 
+        // Determine if this is a document or collection based on the config
         const isDocument = config.docKeys?.includes(key) || false;
         const isCollection = config.subcollectionKeys?.includes(key) || false;
 
@@ -140,6 +141,13 @@ export default class FirestoreReferenceManager<T extends BaseStorageMapping> imp
 
   /* P R I V A T E */
 
+  /**
+   * Processes a key by looking it up in the cloudConfig and then calling the processKey function
+   * @param key - The key to process
+   * @param processKey - The function to call with the key and documentName
+   * @param keyMatcher - The function to call with the config and key to determine if the key matches
+   * @returns The result of the processKey function
+   */
   private _processByKey<R>(
     key: Extract<keyof T, string>,
     processKey: (
@@ -148,6 +156,7 @@ export default class FirestoreReferenceManager<T extends BaseStorageMapping> imp
     ) => R,
     keyMatcher: (config: CloudBackupConfig<T>[keyof CloudBackupConfig<T>], key: Extract<keyof T, string>) => boolean
   ): R {
+    // look up the key in the cloudConfig
     for (const [documentName, config] of Object.entries(this.cloudConfig)) {
       if (keyMatcher(config, key)) {
         return processKey(key, documentName);
