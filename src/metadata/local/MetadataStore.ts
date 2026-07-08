@@ -43,12 +43,12 @@ export default class MetadataStore<T extends BaseStorageMapping> {
   }
 
   /** Local edit that will be flushed to remote metadata map. */
-  recordLocalChange<K extends keyof T>(key: K, metadata: SyncMetadata): void {
+  recordLocalChange<K extends keyof T>(key: K, metadata: LocalSyncMetadata): void {
     this._persist(key, metadata);
   }
 
   /** Hydration/restore: update local state without scheduling remote flush (I3). */
-  recordSyncedState<K extends keyof T>(key: K, metadata: SyncMetadata): void {
+  recordSyncedState<K extends keyof T>(key: K, metadata: LocalSyncMetadata): void {
     this._persist(key, { ...metadata, syncStatus: metadata.syncStatus ?? SyncStatus.Synced });
   }
 

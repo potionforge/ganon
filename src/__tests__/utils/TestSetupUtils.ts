@@ -80,6 +80,8 @@ export function createMockMetadataManager<T extends BaseStorageMapping>(): jest.
     updateSyncStatus: jest.fn(),
     hydrateMetadata: jest.fn(),
     needsHydration: jest.fn(),
+    getRemoteMetadataOnly: jest.fn(),
+    invalidateCacheForHydration: jest.fn(),
     ensureConsistency: jest.fn(),
     invalidateCache: jest.fn(),
     cancelPendingOperations: jest.fn(),

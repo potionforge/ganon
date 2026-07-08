@@ -156,9 +156,14 @@ is a config flip, not an app release. Enable `'v2'` only after both criteria pas
 After sub-step 2 stabilizes, coordinate with library step 6.3. Shrink integrity-recovery
 surface per proposal §4.5 (docKeys first).
 
-**Known deferral (M3):** `DeleteOperation` does not yet remove stale `digestMap` entries.
-Stale entries are mostly harmless under dual-read but will pollute step 6.2 fleet-verification
-queries (`hasAnyRemoteData`, analytics). Track cleanup with 6.2 work.
+**Known deferral (M3):** `DeleteOperation` removes the value but leaves the `digestMap` entry
+behind. **Symptom to expect in the wild: deleted keys churn `needsHydration` until `digestMap`
+is cleaned.** Every subsequent `start()`/hydration sees a remote digest for the deleted key,
+flags `needsHydration`, fetches, gets `undefined`, and skips — so `needsHydration` never clears.
+This is not data loss, but it means a perpetual per-`start()` re-check for every deleted key,
+forever, plus a misleading signal if you ever alert on hydration anomalies. Stale entries will
+also pollute step 6.2 fleet-verification queries (`hasAnyRemoteData`, analytics). Track cleanup
+with 6.2 work (delete must also clear the `digestMap` entry).
 
 ---
 

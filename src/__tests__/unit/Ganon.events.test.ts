@@ -27,6 +27,8 @@ const mockStorageManager: any = {
 };
 
 const mockSyncEngine: any = {
+  start: jest.fn(),
+  stop: jest.fn(),
   startSyncInterval: jest.fn(),
   stopSyncInterval: jest.fn(),
   cancelPendingOperations: jest.fn(),

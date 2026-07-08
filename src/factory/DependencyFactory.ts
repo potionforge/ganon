@@ -3,7 +3,6 @@ import FirestoreManager from "../firestore/FirestoreManager";
 import FirestoreReferenceManager from "../firestore/ref/FirestoreReferenceManager";
 import StorageManager from "../managers/StorageManager";
 import UserManager from "../managers/UserManager";
-import LocalMetadataManager from "../metadata/local/LocalMetadataManager";
 import MetadataStore from "../metadata/local/MetadataStore";
 import MetadataCoordinatorRepo from "../metadata/MetadataCoordinatorRepo";
 import MetadataManager from "../metadata/MetadataManager";
@@ -17,7 +16,7 @@ import { SystemClock } from "../ports/Clock";
 import { SystemScheduler } from "../ports/Scheduler";
 import { MMKV } from "react-native-mmkv";
 import { KeyValueStore } from "../ports/KeyValueStore";
-import { FirebaseFirestoreTypes, getFirestore } from '@react-native-firebase/firestore';
+import { getFirestore } from '@react-native-firebase/firestore';
 import KeyRouter from "../routing/KeyRouter";
 
 export default class DependencyFactory<T extends BaseStorageMapping> {

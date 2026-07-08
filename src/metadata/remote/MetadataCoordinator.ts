@@ -1,6 +1,5 @@
 import { SyncMetadata } from "../../models/sync/SyncMetadata";
 import { BaseStorageMapping } from "../../models/storage/BaseStorageMapping";
-import Log from "../../utils/Log";
 import MetadataStorage from "../../models/sync/MetadataStorage";
 import FirestoreReferenceManager from "../../firestore/ref/FirestoreReferenceManager";
 import FirestoreAdapter from "../../firestore/FirestoreAdapter";
