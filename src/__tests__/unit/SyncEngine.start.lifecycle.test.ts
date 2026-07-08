@@ -5,6 +5,7 @@ import OperationRepo from '../../sync/OperationRepo';
 import MetadataManager from '../../metadata/MetadataManager';
 import UserManager from '../../managers/UserManager';
 import { GanonConfig } from '../../models/config/GanonConfig';
+import { IntegrityFailureRecoveryStrategy } from '../../models/config/IntegrityFailureRecoveryStrategy';
 import { SyncStatus } from '../../models/sync/SyncStatus';
 import { FakeScheduler } from '../utils/FakeScheduler';
 import computeHash from '../../utils/computeHash';
@@ -228,6 +229,101 @@ describe('SyncEngine start/stop lifecycle', () => {
     await new Promise<void>(resolve => setImmediate(resolve));
 
     expect(storage.set).not.toHaveBeenCalled();
+  });
+
+  it('stale in-flight hydrate cannot recover via integrity failure after stop()', async () => {
+    const scheduler = new FakeScheduler();
+    const storage = createMockStorageManager<TestStorage>();
+    const metadataManager = createMockMetadataManager<TestStorage>();
+    const firestore = createMockFirestoreManager<TestStorage>();
+    const userManager = createMockUserManager<TestStorage>();
+    userManager.isUserLoggedIn.mockReturnValue(true);
+
+    let releaseFetch!: (value: string) => void;
+    const fetchGate = new Promise<string>(resolve => {
+      releaseFetch = resolve;
+    });
+
+    const remoteValue = 'integrity-mismatch-value';
+    const integrityConfig = {
+      maxRetries: 1,
+      strategy: IntegrityFailureRecoveryStrategy.FORCE_REFRESH,
+    };
+
+    metadataManager.needsHydration.mockResolvedValue(true);
+    metadataManager.get.mockReturnValue(undefined);
+    metadataManager.getRemoteMetadataOnly.mockResolvedValue({
+      digest: 'metadata-digest-does-not-match-value',
+      version: 2,
+    });
+    firestore.fetch.mockImplementation(() => fetchGate);
+
+    const engine = createEngine(
+      scheduler,
+      { autoStartSync: false, integrityFailureConfig: integrityConfig },
+      { storage, metadataManager, firestore, userManager }
+    );
+
+    const hydratePromise = engine.hydrate(undefined, undefined, integrityConfig);
+    await Promise.resolve();
+
+    engine.stop();
+
+    releaseFetch(remoteValue);
+    await hydratePromise;
+    await new Promise<void>(resolve => setImmediate(resolve));
+
+    expect(firestore.fetch).toHaveBeenCalledTimes(1);
+    expect(storage.set).not.toHaveBeenCalled();
+    expect(metadataManager.recordSyncedState).not.toHaveBeenCalled();
+    expect(metadataManager.recordLocalChange).not.toHaveBeenCalled();
+  });
+
+  it('stale in-flight forceHydrate cannot recover via integrity failure after stop()', async () => {
+    const scheduler = new FakeScheduler();
+    const storage = createMockStorageManager<TestStorage>();
+    const metadataManager = createMockMetadataManager<TestStorage>();
+    const firestore = createMockFirestoreManager<TestStorage>();
+    const userManager = createMockUserManager<TestStorage>();
+    userManager.isUserLoggedIn.mockReturnValue(true);
+
+    let releaseFetch!: (value: string) => void;
+    const fetchGate = new Promise<string>(resolve => {
+      releaseFetch = resolve;
+    });
+
+    const remoteValue = 'integrity-mismatch-value';
+    const integrityConfig = {
+      maxRetries: 1,
+      strategy: IntegrityFailureRecoveryStrategy.FORCE_REFRESH,
+    };
+
+    metadataManager.get.mockReturnValue(undefined);
+    metadataManager.getRemoteMetadataOnly.mockResolvedValue({
+      digest: 'metadata-digest-does-not-match-value',
+      version: 2,
+    });
+    firestore.fetch.mockImplementation(() => fetchGate);
+
+    const engine = createEngine(
+      scheduler,
+      { autoStartSync: false, integrityFailureConfig: integrityConfig },
+      { storage, metadataManager, firestore, userManager }
+    );
+
+    const hydratePromise = engine.forceHydrate(['key1'], undefined, integrityConfig);
+    await Promise.resolve();
+
+    engine.stop();
+
+    releaseFetch(remoteValue);
+    await hydratePromise;
+    await new Promise<void>(resolve => setImmediate(resolve));
+
+    expect(firestore.fetch).toHaveBeenCalledTimes(1);
+    expect(storage.set).not.toHaveBeenCalled();
+    expect(metadataManager.recordSyncedState).not.toHaveBeenCalled();
+    expect(metadataManager.recordLocalChange).not.toHaveBeenCalled();
   });
 });
 
