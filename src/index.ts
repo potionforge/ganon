@@ -2,6 +2,7 @@ export { default as Ganon } from './Ganon';
 export { default as LocalGanon } from './LocalGanon';
 export type { LocalGanonConfig } from './LocalGanon';
 export type { GanonConfig } from './models/config/GanonConfig';
+export type { DigestReadMode } from './metadata/digest/selectRemoteDigest';
 export type { IntegrityFailureConfig } from './models/config/IntegrityFailureConfig';
 export { IntegrityFailureRecoveryStrategy } from './models/config/IntegrityFailureRecoveryStrategy';
 export { ConflictResolutionStrategy } from './models/config/ConflictResolutionStrategy';

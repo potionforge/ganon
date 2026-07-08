@@ -1,8 +1,9 @@
 import StorageManager from "../managers/StorageManager";
 import FirestoreManager from "../firestore/FirestoreManager";
-import { ISyncController } from "../models/interfaces/ISyncController";
+import { ISyncEngine } from "../models/interfaces/ISyncEngine";
 import { BaseStorageMapping } from "../models/storage/BaseStorageMapping";
 import { InternalGanonConfig } from "../models/config/GanonConfig";
+import { resolveGanonConfig, ResolvedGanonConfig } from "../models/config/resolveGanonConfig";
 import { IntegrityFailureConfig } from "../models/config/IntegrityFailureConfig";
 import { ConflictResolutionConfig } from "../models/config/ConflictResolutionConfig";
 import { IntegrityFailureRecoveryStrategy } from "../models/config/IntegrityFailureRecoveryStrategy";
@@ -21,21 +22,25 @@ import { SyncMetadata } from "../models/sync/SyncMetadata";
 import LocalSyncMetadata from "../models/sync/LocalSyncMetadata";
 import MetadataManager from "../metadata/MetadataManager";
 import computeHash from "../utils/computeHash";
+import { nextVersion } from "../utils/nextVersion";
 import UserManager from "../managers/UserManager";
 import { ConflictResolver } from "./ConflictResolver";
+import { Clock, SystemClock } from "../ports/Clock";
+import { CancelHandle, Scheduler, SystemScheduler } from "../ports/Scheduler";
+import KeyRouter from "../routing/KeyRouter";
 
 /**
  * Controller responsible for managing synchronization between local storage and Firestore.
  * Handles operations like backup, restore, and hydration of data.
  */
-export default class SyncController<T extends BaseStorageMapping> implements ISyncController<T> {
-  private syncInterval: NodeJS.Timeout | number | null = null;
+export default class SyncEngine<T extends BaseStorageMapping> implements ISyncEngine<T> {
+  private syncIntervalHandle: CancelHandle | null = null;
   private hydrationPromise: Promise<RestoreResult> | null = null;
   private syncInProgress: boolean = false;
 
   // Debounce batching for markAsPending
   private _pendingMarkKeys: Set<Extract<keyof T, string>> = new Set();
-  private _markDebounceTimer: NodeJS.Timeout | null = null;
+  private _markDebounceHandle: CancelHandle | null = null;
   private readonly _MARK_DEBOUNCE_DELAY = 50; // ms
 
   // Per-invocation integrity config
@@ -47,17 +52,32 @@ export default class SyncController<T extends BaseStorageMapping> implements ISy
   // Tracked conflicts for analytics
   private _trackedConflicts: ConflictInfo<T>[] = [];
 
+  private keyRouter: KeyRouter<T>;
+  private resolvedConfig: ResolvedGanonConfig<T>;
+
   constructor(
     private storage: StorageManager<T>,
     private firestore: FirestoreManager<T>,
     private metadataManager: MetadataManager<T>,
     private operationRepo: OperationRepo<T>,
     private userManager: UserManager<T>,
-    private config: InternalGanonConfig<T>
+    private config: InternalGanonConfig<T>,
+    private clock: Clock = new SystemClock(),
+    private scheduler: Scheduler = new SystemScheduler(),
+    keyRouter?: KeyRouter<T>
   ) {
-    Log.verbose('Ganon: SyncController.constructor');
+    this.resolvedConfig = resolveGanonConfig(config);
+    this.keyRouter = keyRouter ?? new KeyRouter(config.cloudConfig);
+    Log.verbose('Ganon: SyncEngine.constructor');
+  }
 
-    if (this.config.autoStartSync) {
+  /**
+   * Starts sync interval and hydration when configured. Called from Ganon init/login.
+   * Constructor is side-effect free (step 7).
+   */
+  start(): void {
+
+    if (this.resolvedConfig.autoStartSync) {
       this.startSyncInterval();
     }
 
@@ -67,11 +87,18 @@ export default class SyncController<T extends BaseStorageMapping> implements ISy
   }
 
   /**
+   * Whether a hydration pass is currently in flight.
+   */
+  isHydrationInProgress(): boolean {
+    return this.hydrationPromise !== null;
+  }
+
+  /**
    * Checks if any remote metadata exists for configured keys.
    * Used to decide whether to restore (existing user) or backup (new user).
    */
   async hasAnyRemoteData(): Promise<boolean> {
-    Log.verbose('Ganon: SyncController.hasAnyRemoteData');
+    Log.verbose('Ganon: SyncEngine.hasAnyRemoteData');
     if (!this.userManager.isUserLoggedIn()) {
       return false;
     }
@@ -125,22 +152,14 @@ export default class SyncController<T extends BaseStorageMapping> implements ISy
    * If an interval is already running, this method does nothing.
    */
   startSyncInterval(): void {
-    Log.verbose('Ganon: SyncController.startSyncInterval');
-    if (this.syncInterval) {
+    Log.verbose('Ganon: SyncEngine.startSyncInterval');
+    if (this.syncIntervalHandle) {
       return;
     }
 
-    const interval = setInterval(() => {
+    this.syncIntervalHandle = this.scheduler.repeat(() => {
       this.syncPending();
     }, this.config.syncInterval || DEFAULT_SYNC_INTERVAL);
-
-    // Only call unref() in Node.js environments (for tests)
-    // In React Native, setInterval returns a number, not a Timer object
-    if (typeof interval === 'object' && 'unref' in interval && typeof interval.unref === 'function') {
-      interval.unref();
-    }
-
-    this.syncInterval = interval;
   }
 
   /**
@@ -148,10 +167,10 @@ export default class SyncController<T extends BaseStorageMapping> implements ISy
    * Logs a message when the interval is stopped.
    */
   stopSyncInterval(): void {
-    Log.verbose('Ganon: SyncController.stopSyncInterval');
-    if (this.syncInterval) {
-      clearInterval(this.syncInterval);
-      this.syncInterval = null;
+    Log.verbose('Ganon: SyncEngine.stopSyncInterval');
+    if (this.syncIntervalHandle) {
+      this.syncIntervalHandle.cancel();
+      this.syncIntervalHandle = null;
       Log.info("Ganon: sync interval stopped");
     }
   }
@@ -193,12 +212,12 @@ export default class SyncController<T extends BaseStorageMapping> implements ISy
    * @param key - The key to mark as pending for synchronization
    */
   markAsPending(key: Extract<keyof T, string>): void {
-    Log.verbose(`Ganon: SyncController.markAsPending (debounced), key: ${String(key)}`);
+    Log.verbose(`Ganon: SyncEngine.markAsPending (debounced), key: ${String(key)}`);
     this._pendingMarkKeys.add(key);
-    if (this._markDebounceTimer) {
-      clearTimeout(this._markDebounceTimer);
+    if (this._markDebounceHandle) {
+      this._markDebounceHandle.cancel();
     }
-    this._markDebounceTimer = setTimeout(() => {
+    this._markDebounceHandle = this.scheduler.schedule(() => {
       const keys = Array.from(this._pendingMarkKeys);
       this._pendingMarkKeys.clear();
       keys.forEach((pendingKey) => {
@@ -208,7 +227,7 @@ export default class SyncController<T extends BaseStorageMapping> implements ISy
   }
 
   private _processMarkAsPending(key: Extract<keyof T, string>): void {
-    Log.verbose(`Ganon: SyncController._processMarkAsPending, key: ${String(key)}`);
+    Log.verbose(`Ganon: SyncEngine._processMarkAsPending, key: ${String(key)}`);
     const currentValue = this.storage.get(key);
 
     // If the value is undefined, treat it as a deletion
@@ -220,22 +239,20 @@ export default class SyncController<T extends BaseStorageMapping> implements ISy
 
     const currentHash = computeHash(currentValue);
     const existingMetadata = this.metadataManager.get(key);
-    Log.verbose(`Ganon: SyncController._processMarkAsPending, key: ${key}, existingMetadata: ${JSON.stringify(existingMetadata)}, currentHash: ${currentHash}`);
+    Log.verbose(`Ganon: SyncEngine._processMarkAsPending, key: ${key}, existingMetadata: ${JSON.stringify(existingMetadata)}, currentHash: ${currentHash}`);
     
     if (!existingMetadata || existingMetadata.digest !== currentHash) {
       Log.info(`Ganon: marking operation as pending: ${key} (hash changed: ${existingMetadata?.digest} -> ${currentHash})`);
       
-      // Update metadata immediately to reflect the current state
-      // This ensures metadata is accurate even when autosync is disabled
-      // Don't schedule remote sync if autosync is disabled
-      const scheduleRemoteSync = this.config.autoStartSync !== false;
-      
-      // Call set asynchronously but don't await it to avoid blocking the debounced operation
-      const setPromise = this.metadataManager.set(key, {
+      const metadata = {
         syncStatus: SyncStatus.Pending,
         digest: currentHash,
-        version: Date.now(), // Update version to reflect when data was modified
-      }, scheduleRemoteSync);
+        version: nextVersion(existingMetadata?.version ?? 0, this.clock),
+      };
+      const setPromise =
+        this.resolvedConfig.autoStartSync
+          ? this.metadataManager.recordLocalChange(key, metadata)
+          : this.metadataManager.persistLocalChange(key, metadata);
       
       if (setPromise && typeof setPromise.catch === 'function') {
         setPromise.catch(error => {
@@ -258,19 +275,19 @@ export default class SyncController<T extends BaseStorageMapping> implements ISy
    * @param key - The key to mark as deleted for synchronization
    */
   markAsDeleted(key: Extract<keyof T, string>): void {
-    Log.verbose(`Ganon: SyncController.markAsDeleted, key: ${String(key)}`);
+    Log.verbose(`Ganon: SyncEngine.markAsDeleted, key: ${String(key)}`);
 
     // Get existing metadata
     const existingMetadata = this.metadataManager.get(key);
 
     // Only create delete operation if metadata exists and has a valid digest
     // If no metadata exists or digest is empty, the key was never synced so nothing to delete
-    if (!existingMetadata || !existingMetadata.digest || existingMetadata.digest === '') {
+    if (this.metadataManager.isNeverSynced(key)) {
       Log.info(`Ganon: skipping delete operation for ${key} - no remote data to delete (digest: ${existingMetadata?.digest || 'none'})`);
       return;
     }
 
-    Log.info(`Ganon: marking operation as deleted: ${key} (existing digest: ${existingMetadata.digest})`);
+    Log.info(`Ganon: marking operation as deleted: ${key} (existing digest: ${existingMetadata?.digest})`);
 
     // Set sync status to Pending immediately when operation is queued
     this.metadataManager.updateSyncStatus(key, SyncStatus.Pending);
@@ -290,7 +307,7 @@ export default class SyncController<T extends BaseStorageMapping> implements ISy
    * @throws Will throw if there's an ongoing hydration operation
    */
   async syncAll(): Promise<BackupResult> {
-    Log.verbose('Ganon: SyncController.syncAll');
+    Log.verbose('Ganon: SyncEngine.syncAll');
     try {
       if (this.hydrationPromise) {
         await this.hydrationPromise;
@@ -368,7 +385,7 @@ export default class SyncController<T extends BaseStorageMapping> implements ISy
    * @throws Will not throw, but will return a failed result if user is not logged in
    */
   async restore(): Promise<RestoreResult> {
-    Log.verbose('Ganon: SyncController.restore');
+    Log.verbose('Ganon: SyncEngine.restore');
     if (!this.userManager.isUserLoggedIn()) {
       Log.info("Ganon: skipping restore because user is not logged in");
       throw new Error("Restore operation failed: User is not logged in");
@@ -379,6 +396,12 @@ export default class SyncController<T extends BaseStorageMapping> implements ISy
       const value = await this.firestore.fetch(key);
       if (value !== undefined) {
         this.storage.set(key, value as T[Extract<keyof T, string>]);
+        const remoteMeta = this.metadataManager.getRemoteMetaForKey(key);
+        await this.metadataManager.recordSyncedState(key, {
+          digest: computeHash(value),
+          version: remoteMeta?.v ?? 0,
+          syncStatus: SyncStatus.Synced,
+        });
         Log.info(`✅ Ganon: restored key ${key}`);
         return true;
       }
@@ -459,11 +482,11 @@ export default class SyncController<T extends BaseStorageMapping> implements ISy
 
                 // Update metadata to reflect the resolved state
                 const resolvedHash = computeHash(resolution.resolvedValue!);
-                await this.metadataManager.set(key, {
+                await this.metadataManager.recordSyncedState(key, {
                   syncStatus: SyncStatus.Synced,
                   digest: resolvedHash,
-                  version: Date.now(),
-                }, false); // Don't schedule remote sync during hydration
+                  version: nextVersion(localMetadata?.version ?? 0, this.clock),
+                });
 
                 Log.info(`✅ Ganon: hydrated key ${key} with resolved value (conflict resolved)`);
                 return true; // Skip integrity checks since we've resolved the conflict
@@ -515,11 +538,11 @@ export default class SyncController<T extends BaseStorageMapping> implements ISy
             // Only store the data if we have valid remote metadata and the integrity check passed
             if (remoteMetadata && remoteComputedDigest === remoteMetadata.digest) {
               this.storage.set(key, remoteValue as T[Extract<keyof T, string>]);
-              await this.metadataManager.set(key, {
+              await this.metadataManager.recordSyncedState(key, {
                 syncStatus: SyncStatus.Synced,
                 digest: remoteMetadata.digest,
                 version: remoteMetadata.version,
-              }, false); // Don't schedule remote sync during hydration
+              });
               Log.info(`✅ Ganon: hydrated key ${key} with hash ${remoteComputedDigest}`);
               return true;
             } else {
@@ -539,8 +562,7 @@ export default class SyncController<T extends BaseStorageMapping> implements ISy
       // After hydration completes, trigger a sync if there are pending operations
       if (this.hasPendingOperations()) {
         Log.info("Ganon: hydration complete, triggering sync for pending operations");
-        // Use setTimeout to ensure this happens after the current hydration promise resolves
-        setTimeout(() => this.syncPending(), 0);
+        this.scheduler.schedule(() => this.syncPending(), 0);
       }
 
       return result;
@@ -662,11 +684,11 @@ export default class SyncController<T extends BaseStorageMapping> implements ISy
           // Only store the data if we have valid remote metadata and the integrity check passed
           if (remoteMetadata && remoteComputedDigest === remoteMetadata.digest) {
             this.storage.set(key, remoteValue as T[Extract<keyof T, string>]);
-            await this.metadataManager.set(key, {
+            await this.metadataManager.recordSyncedState(key, {
               syncStatus: SyncStatus.Synced,
               digest: remoteMetadata.digest,
               version: remoteMetadata.version,
-            }, false); // Don't schedule remote sync during hydration
+            });
             Log.info(`✅ Ganon: force hydrated key ${key} with hash ${remoteComputedDigest}`);
             return true;
           } else {
@@ -685,8 +707,7 @@ export default class SyncController<T extends BaseStorageMapping> implements ISy
       // After hydration completes, trigger a sync if there are pending operations
       if (this.hasPendingOperations()) {
         Log.info("Ganon: force hydration complete, triggering sync for pending operations");
-        // Use setTimeout to ensure this happens after the current hydration promise resolves
-        setTimeout(() => this.syncPending(), 0);
+        this.scheduler.schedule(() => this.syncPending(), 0);
       }
 
       return result;
@@ -704,7 +725,7 @@ export default class SyncController<T extends BaseStorageMapping> implements ISy
    * @returns The sync status of the key, or undefined if not found
    */
   getSyncStatus(key: Extract<keyof T, string>): SyncStatus | undefined {
-    Log.verbose(`Ganon: SyncController.getSyncStatus, key: ${String(key)}`);
+    Log.verbose(`Ganon: SyncEngine.getSyncStatus, key: ${String(key)}`);
     const metadata = this.metadataManager.get(key);
     return metadata?.syncStatus;
   }
@@ -715,7 +736,7 @@ export default class SyncController<T extends BaseStorageMapping> implements ISy
    * @returns Array of keys that have the specified sync status
    */
   getKeysByStatus(status: SyncStatus): Extract<keyof T, string>[] {
-    Log.verbose(`Ganon: SyncController.getKeysByStatus, status: ${status}`);
+    Log.verbose(`Ganon: SyncEngine.getKeysByStatus, status: ${status}`);
     const allKeys = this._getAllConfiguredKeys();
     return allKeys.filter(key => {
       const metadata = this.metadataManager.get(key);
@@ -728,7 +749,7 @@ export default class SyncController<T extends BaseStorageMapping> implements ISy
    * @returns Object with counts for each sync status
    */
   getSyncStatusSummary(): Record<SyncStatus, number> {
-    Log.verbose('Ganon: SyncController.getSyncStatusSummary');
+    Log.verbose('Ganon: SyncEngine.getSyncStatusSummary');
     const summary = {
       [SyncStatus.Pending]: 0,
       [SyncStatus.InProgress]: 0,
@@ -753,7 +774,7 @@ export default class SyncController<T extends BaseStorageMapping> implements ISy
    * @returns True if sync operations are ongoing
    */
   hasPendingOperations(): boolean {
-    Log.verbose('Ganon: SyncController.hasPendingOperations');
+    Log.verbose('Ganon: SyncEngine.hasPendingOperations');
     const allKeys = this._getAllConfiguredKeys();
     return allKeys.some(key => {
       const status = this.getSyncStatus(key);
@@ -766,7 +787,7 @@ export default class SyncController<T extends BaseStorageMapping> implements ISy
    * This includes stopping the sync interval and clearing any pending operations.
    */
   destroy(): void {
-    Log.verbose('Ganon: SyncController.destroy');
+    Log.verbose('Ganon: SyncEngine.destroy');
     this.stopSyncInterval();
     this.operationRepo.clearAll();
   }
@@ -775,7 +796,7 @@ export default class SyncController<T extends BaseStorageMapping> implements ISy
    * Cancel all pending sync operations, typically called on user logout
    */
   cancelPendingOperations(): void {
-    Log.verbose('Ganon: SyncController.cancelPendingOperations');
+    Log.verbose('Ganon: SyncEngine.cancelPendingOperations');
     // Cancel pending metadata sync operations
     this.metadataManager.cancelPendingOperations();
 
@@ -789,7 +810,7 @@ export default class SyncController<T extends BaseStorageMapping> implements ISy
    * Updates the last backup timestamp in local storage and syncs it to the remote user document.
    */
   private _updateLastBackup(): void {
-    Log.verbose('Ganon: SyncController._updateLastBackup');
+    Log.verbose('Ganon: SyncEngine._updateLastBackup');
     const timestamp = Date.now();
     this.storage.set('lastBackup' as Extract<keyof T, string>, timestamp as T[Extract<keyof T, string>]);
     
@@ -851,7 +872,7 @@ export default class SyncController<T extends BaseStorageMapping> implements ISy
     integrityConfig?: Partial<IntegrityFailureConfig>,
     conflictConfig?: Partial<ConflictResolutionConfig>
   ): Promise<RestoreResult> {
-    Log.verbose(`Ganon: SyncController._processKeys, operation: ${operation}`);
+    Log.verbose(`Ganon: SyncEngine._processKeys, operation: ${operation}`);
     const restoredKeys: Extract<keyof T, string>[] = [];
     const failedKeys: Extract<keyof T, string>[] = [];
     const integrityFailures: IntegrityFailureInfo[] = [];
@@ -902,7 +923,7 @@ export default class SyncController<T extends BaseStorageMapping> implements ISy
    * (e.g., when user is not logged in).
    */
   private get _emptyRestoreResult(): RestoreResult {
-    Log.verbose('Ganon: SyncController._emptyRestoreResult');
+    Log.verbose('Ganon: SyncEngine._emptyRestoreResult');
     return {
       success: false,
       timestamp: new Date(),
@@ -919,16 +940,8 @@ export default class SyncController<T extends BaseStorageMapping> implements ISy
    * @returns Array of all configured keys
    */
   private _getAllConfiguredKeys(): Extract<keyof T, string>[] {
-    Log.verbose('Ganon: SyncController._getAllConfiguredKeys');
-    const keys = new Set<Extract<keyof T, string>>();
-
-    Object.values(this.firestore.cloudConfig).forEach(docConfig => {
-      [...(docConfig.docKeys || []), ...(docConfig.subcollectionKeys || [])].forEach(key =>
-        keys.add(key)
-      );
-    });
-
-    return Array.from(keys);
+    Log.verbose('Ganon: SyncEngine._getAllConfiguredKeys');
+    return this.keyRouter.allCloudKeys();
   }
 
   /**
@@ -1030,11 +1043,11 @@ export default class SyncController<T extends BaseStorageMapping> implements ISy
 
       // Update metadata to reflect the resolved state
       const resolvedHash = computeHash(result.resolvedValue);
-      await this.metadataManager.set(key, {
+      await this.metadataManager.recordSyncedState(key, {
         syncStatus: SyncStatus.Synced,
         digest: resolvedHash,
-        version: Date.now(),
-      }, false); // Don't schedule remote sync during hydration
+        version: nextVersion(this.metadataManager.get(key)?.version ?? 0, this.clock),
+      });
 
       Log.info(`Ganon: Successfully resolved conflict for key ${key} using strategy: ${config.strategy}`);
     } else {
@@ -1147,10 +1160,10 @@ export default class SyncController<T extends BaseStorageMapping> implements ISy
         const localHash = computeHash(localValue);
 
         // Update metadata to reflect local state
-        await this.metadataManager.set(key, {
+        await this.metadataManager.recordLocalChange(key, {
           syncStatus: SyncStatus.Synced,
           digest: localHash,
-          version: Date.now(),
+          version: nextVersion(this.metadataManager.get(key)?.version ?? 0, this.clock),
         });
 
         Log.info(`Ganon: Successfully used local data for key ${key}`);
@@ -1194,11 +1207,11 @@ export default class SyncController<T extends BaseStorageMapping> implements ISy
         this.storage.set(key, remoteValue as T[Extract<keyof T, string>]);
 
         // Update metadata to reflect the remote state
-        await this.metadataManager.set(key, {
+        await this.metadataManager.recordSyncedState(key, {
           syncStatus: SyncStatus.Synced,
           digest: remoteComputedHash,
-          version: Date.now(),
-        }, false); // Don't schedule remote sync during hydration
+          version: nextVersion(this.metadataManager.get(key)?.version ?? 0, this.clock),
+        });
 
         Log.info(`✅ Ganon: Successfully used remote data despite integrity failure for key ${key}`);
         return { success: true, recoveryStrategy: 'use_remote_despite_integrity' };

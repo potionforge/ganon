@@ -2,6 +2,7 @@ import FirestoreManager from "./firestore/FirestoreManager";
 import StorageManager from "./managers/StorageManager";
 import NetworkMonitor from "./utils/NetworkMonitor";
 import { GanonConfig, InternalGanonConfig } from "./models/config/GanonConfig";
+import { resolveGanonConfig, ResolvedGanonConfig } from "./models/config/resolveGanonConfig";
 import { IntegrityFailureConfig } from "./models/config/IntegrityFailureConfig";
 import { IGanon } from "./models/interfaces/IGanon";
 import { BaseStorageMapping } from "./models/storage/BaseStorageMapping";
@@ -9,7 +10,7 @@ import { BackupResult } from "./models/sync/BackupResult";
 import { RestoreResult } from "./models/sync/RestoreResult";
 import Log from "./utils/Log";
 import SyncError, { SyncErrorType } from "./errors/SyncError";
-import SyncController from "./sync/SyncController";
+import SyncEngine from "./sync/SyncEngine";
 import DependencyFactory from "./factory/DependencyFactory";
 import UserManager from "./managers/UserManager";
 import { ConflictResolutionConfig } from "./models/config/ConflictResolutionConfig";
@@ -18,16 +19,23 @@ import type {
   GanonEventPayloadMap,
   GanonEventListener,
 } from "./models/events/GanonEvents";
+import KeyRouter from "./routing/KeyRouter";
+import { METADATA_KEY, DIGEST_MAP_KEY, REMOTE_METADATA_KEY } from "./constants";
 
 export default class Ganon<T extends Record<string, any> & BaseStorageMapping> implements IGanon<T> {
   private storageManager: StorageManager<T>;
-  private syncController: SyncController<T>;
+  private syncEngine: SyncEngine<T>;
   private firestoreManager: FirestoreManager<T>;
   private networkMonitor: NetworkMonitor;
   private static unhandledRejectionHandlerSet = false;
   private userManager: UserManager<T>;
+  private keyRouter: KeyRouter<T>;
   private isDestroyed: boolean = false;
   private isInitialized: boolean = false;
+  private hydrationWaiters: Array<{ resolve: () => void; cycle: number }> = [];
+  private hydrationCycle = 0;
+  private hydrationSettled = true;
+  private readonly resolvedConfig: ResolvedGanonConfig<T>;
 
   private readonly _listeners = new Map<
     GanonEventName,
@@ -35,6 +43,7 @@ export default class Ganon<T extends Record<string, any> & BaseStorageMapping> i
   >();
 
   constructor(readonly config: GanonConfig<T>) {
+    this.resolvedConfig = resolveGanonConfig(config);
     this._validateConfig(config);
 
     if (config.logLevel !== undefined) {
@@ -45,7 +54,12 @@ export default class Ganon<T extends Record<string, any> & BaseStorageMapping> i
     const internalConfig: InternalGanonConfig<T> = {
       ...config,
       eventCallbacks: {
-        onHydrationComplete: (result) => this._emit("hydrationComplete", result),
+        onHydrationComplete: (result) => {
+          if (this.isUserLoggedIn()) {
+            this._settleHydrationWaiters();
+          }
+          this._emit("hydrationComplete", result);
+        },
       },
     };
 
@@ -60,22 +74,25 @@ export default class Ganon<T extends Record<string, any> & BaseStorageMapping> i
       const dependencyFactory = new DependencyFactory<T>(internalConfig);
       const {
         storageManager,
-        syncController,
+        syncEngine,
         firestoreManager,
         networkMonitor,
         userManager,
+        keyRouter,
       } = dependencyFactory.getDependencies();
 
       this.storageManager = storageManager;
-      this.syncController = syncController;
+      this.syncEngine = syncEngine;
       this.firestoreManager = firestoreManager;
       this.networkMonitor = networkMonitor;
       this.userManager = userManager;
+      this.keyRouter = keyRouter;
       this.isInitialized = true;
 
       // Start sync if autoStartSync is enabled and user is logged in
-      if (config.autoStartSync && this.isUserLoggedIn()) {
-        this.startSync();
+      if (this.resolvedConfig.autoStartSync && this.isUserLoggedIn()) {
+        this._beginHydrationCycle();
+        this.syncEngine.start();
       }
     } catch (error) {
       Log.error(`Ganon: Failed to initialize components: ${error}`);
@@ -98,14 +115,14 @@ export default class Ganon<T extends Record<string, any> & BaseStorageMapping> i
    * Starts the automatic synchronization process with the cloud.
    */
   startSync(): void {
-    this.syncController.startSyncInterval();
+    this.syncEngine.startSyncInterval();
   }
 
   /**
    * Stops the automatic synchronization process with the cloud.
    */
   stopSync(): void {
-    this.syncController.stopSyncInterval();
+    this.syncEngine.stopSyncInterval();
   }
 
   /**
@@ -122,6 +139,38 @@ export default class Ganon<T extends Record<string, any> & BaseStorageMapping> i
   }
 
   /**
+   * Returns the stored value or fallback without persisting the default (I1).
+   */
+  getOrDefault<K extends keyof T>(key: K, fallback: T[K]): T[K] {
+    const value = this.get(key);
+    return value !== undefined ? value : fallback;
+  }
+
+  /**
+   * Resolves when Ganon's hydration settles for the current login cycle.
+   * Pending before first login; waiters resolve on logout; fresh pending per new login.
+   * Resolves when Ganon's hydration settles — consumer-side post-login merges may not have applied yet.
+   */
+  whenHydrated(): Promise<void> {
+    if (this.isDestroyed) {
+      return Promise.reject(
+        new SyncError('Cannot perform operation: Ganon instance has been destroyed', SyncErrorType.SyncConfigurationError)
+      );
+    }
+    if (!this.isUserLoggedIn()) {
+      return new Promise(resolve => {
+        this.hydrationWaiters.push({ resolve, cycle: 0 });
+      });
+    }
+    if (!this._isHydrationPending()) {
+      return Promise.resolve();
+    }
+    return new Promise(resolve => {
+      this.hydrationWaiters.push({ resolve, cycle: this.hydrationCycle });
+    });
+  }
+
+  /**
    * Sets a value in storage for a given key and marks it for synchronization if the key is configured in cloudConfig.
    * @param key - The key to set the value for.
    * @param value - The value to store.
@@ -131,9 +180,10 @@ export default class Ganon<T extends Record<string, any> & BaseStorageMapping> i
       throw new SyncError('Cannot perform operation: Ganon instance has been destroyed', SyncErrorType.SyncConfigurationError);
     }
 
+    this._guardEarlyWrite(key);
     this.storageManager.set(key, value);
     if (this._shouldSyncKey(key) && this.isUserLoggedIn()) {
-      this.syncController.markAsPending(key);
+      this.syncEngine.markAsPending(key);
     }
   }
 
@@ -146,9 +196,10 @@ export default class Ganon<T extends Record<string, any> & BaseStorageMapping> i
       throw new SyncError('Cannot perform operation: Ganon instance has been destroyed', SyncErrorType.SyncConfigurationError);
     }
 
+    this._guardEarlyWrite(key);
     this.storageManager.remove(key);
     if (this._shouldSyncKey(key) && this.isUserLoggedIn()) {
-      this.syncController.markAsDeleted(key);
+      this.syncEngine.markAsDeleted(key);
     }
   }
 
@@ -162,9 +213,10 @@ export default class Ganon<T extends Record<string, any> & BaseStorageMapping> i
       throw new SyncError('Cannot perform operation: Ganon instance has been destroyed', SyncErrorType.SyncConfigurationError);
     }
 
+    this._guardEarlyWrite(key);
     this.storageManager.upsert(key, value);
     if (this._shouldSyncKey(key) && this.isUserLoggedIn()) {
-      this.syncController.markAsPending(key);
+      this.syncEngine.markAsPending(key);
     }
   }
 
@@ -189,7 +241,7 @@ export default class Ganon<T extends Record<string, any> & BaseStorageMapping> i
   async backup(): Promise<BackupResult> {
     Log.info('Ganon: Backing up all data to the cloud');
     try {
-      const result = await this.syncController.syncAll();
+      const result = await this.syncEngine.syncAll();
       this._emit("syncComplete", result);
       return result;
     } catch (error) {
@@ -210,7 +262,7 @@ export default class Ganon<T extends Record<string, any> & BaseStorageMapping> i
    */
   async restore(): Promise<RestoreResult> {
     Log.info('Ganon: Restoring all data from the cloud');
-    const result = await this.syncController.restore();
+    const result = await this.syncEngine.restore();
     this._emit("restoreComplete", result);
     Log.info(`✅ Ganon: Restored ${result.restoredKeys.length} keys`);
     if (result.failedKeys.length > 0) {
@@ -235,7 +287,7 @@ export default class Ganon<T extends Record<string, any> & BaseStorageMapping> i
 
     Log.info('Ganon: Hydrating data from the cloud');
     try {
-      const result = await this.syncController.hydrate(keys, conflictConfig, integrityConfig);
+      const result = await this.syncEngine.hydrate(keys, conflictConfig, integrityConfig);
       Log.info(`✅ Ganon: Hydrated ${result.restoredKeys.length} keys`);
       if (result.failedKeys.length > 0) {
         Log.error(`❌ Ganon: Failed to hydrate ${result.failedKeys.length} keys: ${result.failedKeys.join(', ')}`);
@@ -275,7 +327,7 @@ export default class Ganon<T extends Record<string, any> & BaseStorageMapping> i
 
     Log.info('Ganon: Force hydrating data from the cloud');
     try {
-      const result = await this.syncController.forceHydrate(keys, conflictConfig, integrityConfig);
+      const result = await this.syncEngine.forceHydrate(keys, conflictConfig, integrityConfig);
       Log.info(`✅ Ganon: Force hydrated ${result.restoredKeys.length} keys`);
       if (result.failedKeys.length > 0) {
         Log.error(`❌ Ganon: Failed to force hydrate ${result.failedKeys.length} keys: ${result.failedKeys.join(', ')}`);
@@ -364,29 +416,37 @@ export default class Ganon<T extends Record<string, any> & BaseStorageMapping> i
       return "noop";
     }
 
-    // Set identifier locally to mark user as logged in
-    this.storageManager.set(this.config.identifierKey as Extract<keyof T, string>, userId as unknown as T[Extract<keyof T, string>]);
+    this._beginHydrationCycle();
 
-    // Decide whether remote has data
-    const hasRemote = await this.syncController.hasAnyRemoteData();
+    try {
+      // Set identifier locally to mark user as logged in
+      this.storageManager.set(this.config.identifierKey as Extract<keyof T, string>, userId as unknown as T[Extract<keyof T, string>]);
 
-    let result: "restore" | "backup";
-    if (hasRemote) {
-      Log.info('Ganon: Existing remote data detected on login - restoring');
-      await this.restore();
-      result = "restore";
-    } else {
-      Log.info('Ganon: No remote data detected on login - backing up local guest state');
-      await this.backup();
-      result = "backup";
+      // Decide whether remote has data
+      const hasRemote = await this.syncEngine.hasAnyRemoteData();
+
+      let result: "restore" | "backup";
+      if (hasRemote) {
+        Log.info('Ganon: Existing remote data detected on login - restoring');
+        await this.restore();
+        result = "restore";
+      } else {
+        Log.info('Ganon: No remote data detected on login - backing up local guest state');
+        await this.backup();
+        result = "backup";
+      }
+
+      if (this.resolvedConfig.autoStartSync) {
+        this.syncEngine.start();
+      } else {
+        this._settleHydrationWaiters();
+      }
+
+      return result;
+    } catch (error) {
+      this._settleHydrationWaiters();
+      throw error;
     }
-
-    // Start sync if autoStartSync is enabled (sync was stopped during logout)
-    if (this.config.autoStartSync) {
-      this.startSync();
-    }
-
-    return result;
   }
 
   /**
@@ -408,7 +468,8 @@ export default class Ganon<T extends Record<string, any> & BaseStorageMapping> i
     } finally {
       // Stop sync and cancel pending operations
       this.stopSync();
-      this.syncController.cancelPendingOperations();
+      this.syncEngine.cancelPendingOperations();
+      this._resetHydrationCycle();
 
       // Clear all data
       this.clearAllData();
@@ -430,8 +491,8 @@ export default class Ganon<T extends Record<string, any> & BaseStorageMapping> i
       this.stopSync();
 
       // Clean up components if they exist
-      if (this.syncController) {
-        this.syncController.destroy();
+      if (this.syncEngine) {
+        this.syncEngine.destroy();
       }
       if (this.networkMonitor) {
         this.networkMonitor.destroy();
@@ -495,6 +556,52 @@ export default class Ganon<T extends Record<string, any> & BaseStorageMapping> i
 
   /* P R I V A T E */
 
+  /** Shared by whenHydrated() and earlyWriteGuard — one definition of hydration-pending. */
+  private _isHydrationPending(): boolean {
+    return this.isUserLoggedIn() && !this.hydrationSettled;
+  }
+
+  private _beginHydrationCycle(): void {
+    this.hydrationCycle += 1;
+    this.hydrationSettled = false;
+  }
+
+  private _settleHydrationWaiters(): void {
+    this.hydrationSettled = true;
+    const cycle = this.hydrationCycle;
+    const waiters = this.hydrationWaiters.filter(w => w.cycle === cycle || w.cycle === 0);
+    this.hydrationWaiters = this.hydrationWaiters.filter(w => w.cycle !== cycle && w.cycle !== 0);
+    waiters.forEach(w => w.resolve());
+  }
+
+  /** Resolve pending waiters on logout so promises never dangle across sessions. */
+  private _resolveHydrationWaitersOnLogout(): void {
+    const waiters = [...this.hydrationWaiters];
+    this.hydrationWaiters = [];
+    waiters.forEach(w => w.resolve());
+  }
+
+  private _resetHydrationCycle(): void {
+    this._resolveHydrationWaitersOnLogout();
+    this.hydrationCycle += 1;
+    this.hydrationSettled = true;
+  }
+
+  private _guardEarlyWrite(key: Extract<keyof T, string>): void {
+    const guard = this.config.earlyWriteGuard ?? 'off';
+    if (guard === 'off' || !this._shouldSyncKey(key)) {
+      return;
+    }
+    if (!this._isHydrationPending()) {
+      return;
+    }
+    const message = `Write to "${String(key)}" while hydration is in progress`;
+    if (guard === 'throw') {
+      throw new SyncError(message, SyncErrorType.SyncValidationError);
+    }
+    Log.warn(`Ganon: ${message}`);
+  }
+
   /**
    * Checks if a key is configured for cloud synchronization
    * @param key - The key to check
@@ -504,13 +611,7 @@ export default class Ganon<T extends Record<string, any> & BaseStorageMapping> i
     if (!this.isInitialized || this.isDestroyed) {
       return false;
     }
-
-    for (const docConfig of Object.values(this.config.cloudConfig)) {
-      if (docConfig.docKeys?.includes(key) || docConfig.subcollectionKeys?.includes(key)) {
-        return true;
-      }
-    }
-    return false;
+    return this.keyRouter.isCloudKey(key);
   }
 
   /**
@@ -676,6 +777,27 @@ export default class Ganon<T extends Record<string, any> & BaseStorageMapping> i
         if (!validKeyRegex.test(key)) {
           throw new SyncError(
             `Ganon: Key "${key}" in document "${docName}" is invalid. Keys must contain only letters, numbers, underscores, and hyphens.`,
+            SyncErrorType.SyncConfigurationError
+          );
+        }
+
+        if (key === METADATA_KEY) {
+          throw new SyncError(
+            `Ganon: Key "${key}" in document "${docName}" collides with reserved metadata namespace`,
+            SyncErrorType.SyncConfigurationError
+          );
+        }
+
+        if (key === DIGEST_MAP_KEY) {
+          throw new SyncError(
+            `Ganon: Key "${key}" in document "${docName}" collides with reserved in-document digest namespace`,
+            SyncErrorType.SyncConfigurationError
+          );
+        }
+
+        if (key === REMOTE_METADATA_KEY) {
+          throw new SyncError(
+            `Ganon: Key "${key}" in document "${docName}" collides with reserved legacy remote metadata namespace`,
             SyncErrorType.SyncConfigurationError
           );
         }

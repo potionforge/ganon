@@ -12,6 +12,9 @@ import DataProcessor from "./processing/DataProcessor";
 import FirestoreAdapter from "./FirestoreAdapter";
 import ChunkManager from "./chunking/ChunkManager";
 import UserManager from "../managers/UserManager";
+import { Scheduler } from "../ports/Scheduler";
+import KeyRouter from "../routing/KeyRouter";
+import { DIGEST_MAP_KEY } from "../constants";
 
 export default class FirestoreManager<T extends BaseStorageMapping> implements ICloudManager<T> {
   private referenceManager: FirestoreReferenceManager<T>;
@@ -33,12 +36,18 @@ export default class FirestoreManager<T extends BaseStorageMapping> implements I
     public identifierKey: string,
     public cloudConfig: CloudBackupConfig<T>,
     private adapter: FirestoreAdapter<T>,
-    userManager: UserManager<T>
+    userManager: UserManager<T>,
+    referenceManager?: FirestoreReferenceManager<T>,
+    scheduler?: Scheduler
   ) {
     this.userManager = userManager;
-    this.referenceManager = new FirestoreReferenceManager(userManager, cloudConfig);
+    this.referenceManager = referenceManager ?? new FirestoreReferenceManager(
+      userManager,
+      cloudConfig,
+      new KeyRouter(cloudConfig)
+    );
     this.dataProcessor = new DataProcessor();
-    this.chunkManager = new ChunkManager(this.adapter, this.dataProcessor);
+    this.chunkManager = new ChunkManager(this.adapter, this.dataProcessor, scheduler);
   }
 
   /**
@@ -161,17 +170,46 @@ export default class FirestoreManager<T extends BaseStorageMapping> implements I
   }
 
   /**
-   * Backs up a value to Firestore for a given key
+   * Intent-shaped write API for sync layer (no Firestore vocabulary in src/sync/).
+   */
+  async writeValueWithDigest(
+    key: Extract<keyof T, string>,
+    value: any,
+    digest: string,
+    version: number,
+    transaction: FirebaseFirestoreTypes.Transaction
+  ): Promise<void> {
+    await this.backup(key, value, { transaction, digest, version });
+  }
+
+  /** Runs a transaction that atomically writes value + in-document digest for docKeys. */
+  async syncValueWithDigest(
+    key: Extract<keyof T, string>,
+    value: any,
+    digest: string,
+    version: number
+  ): Promise<void> {
+    await this.runTransaction(async (transaction) => {
+      await this.writeValueWithDigest(key, value, digest, version, transaction);
+    });
+  }
+
+  /**
+   * Backs up a value to Firestore for a given key with required digest metadata.
    * @param key - The key to backup the value for
    * @param value - The value to backup
-   * @param options - Optional parameters for the backup operation
+   * @param options - Digest/version (required) and optional transaction
    * @returns Promise that resolves when backup is complete
    * @throws {SyncError} Throws error if backup fails
    */
   async backup(
     key: Extract<keyof T, string>,
     value: any,
-    options?: { transaction?: FirebaseFirestoreTypes.Transaction }
+    options: {
+      digest: string;
+      version: number;
+      transaction?: FirebaseFirestoreTypes.Transaction;
+    }
   ): Promise<void> {
     Log.verbose(`Ganon: FirestoreManager.backup, key: ${String(key)}`);
 
@@ -692,7 +730,11 @@ export default class FirestoreManager<T extends BaseStorageMapping> implements I
     ref: FirebaseFirestoreTypes.DocumentReference,
     key: Extract<keyof T, string>,
     value: any,
-    options?: { transaction?: FirebaseFirestoreTypes.Transaction }
+    options?: {
+      transaction?: FirebaseFirestoreTypes.Transaction;
+      digest?: string;
+      version?: number;
+    }
   ): Promise<void> {
     Log.verbose(`Ganon: FirestoreManager._backupDocumentField, key: ${String(key)}`);
     const keyStr = String(key);
@@ -707,16 +749,22 @@ export default class FirestoreManager<T extends BaseStorageMapping> implements I
       Log.warn(`Ganon FirestoreManager: Invalid field name "${keyStr}" sanitized to "${sanitizedKey}"`);
     }
 
+    const payload: Record<string, unknown> = {
+      [sanitizedKey]: sanitizedData,
+    };
+
+    if (options?.digest !== undefined && options?.version !== undefined) {
+      payload[DIGEST_MAP_KEY] = {
+        [sanitizedKey]: { d: options.digest, v: options.version },
+      };
+    }
+
     if (options?.transaction) {
-      await this.adapter.setDocumentWithTransaction(options.transaction, ref, {
-        [sanitizedKey]: sanitizedData
-      }, {
+      await this.adapter.setDocumentWithTransaction(options.transaction, ref, payload, {
         merge: true
       });
     } else {
-      await this.adapter.setDocument(ref, {
-        [sanitizedKey]: sanitizedData
-      }, {
+      await this.adapter.setDocument(ref, payload, {
         merge: true
       });
     }
@@ -766,7 +814,11 @@ export default class FirestoreManager<T extends BaseStorageMapping> implements I
     ref: FirebaseFirestoreTypes.CollectionReference,
     key: Extract<keyof T, string>,
     value: any,
-    options?: { transaction?: FirebaseFirestoreTypes.Transaction }
+    options?: {
+      transaction?: FirebaseFirestoreTypes.Transaction;
+      digest?: string;
+      version?: number;
+    }
   ): Promise<void> {
     Log.verbose(`Ganon: FirestoreManager._backupSubcollection, key: ${String(key)}`);
 
@@ -775,5 +827,39 @@ export default class FirestoreManager<T extends BaseStorageMapping> implements I
 
     // Use ChunkManager to handle large data
     await this.chunkManager.writeData(ref, String(key), sanitizedData, options);
+
+    if (options?.digest !== undefined && options?.version !== undefined && ref.parent) {
+      await this._writeInDocumentDigest(
+        ref.parent,
+        key,
+        options.digest,
+        options.version,
+        options.transaction
+      );
+    }
+  }
+
+  /**
+   * Writes digest {d,v} into the nested digestMap on a backup document (same txn when provided).
+   */
+  private async _writeInDocumentDigest(
+    docRef: FirebaseFirestoreTypes.DocumentReference,
+    key: Extract<keyof T, string>,
+    digest: string,
+    version: number,
+    transaction?: FirebaseFirestoreTypes.Transaction
+  ): Promise<void> {
+    const sanitizedKey = this.dataProcessor.sanitizeFieldName(String(key));
+    const payload = {
+      [DIGEST_MAP_KEY]: {
+        [sanitizedKey]: { d: digest, v: version },
+      },
+    };
+
+    if (transaction) {
+      await this.adapter.setDocumentWithTransaction(transaction, docRef, payload, { merge: true });
+    } else {
+      await this.adapter.setDocument(docRef, payload, { merge: true });
+    }
   }
 }

@@ -269,72 +269,36 @@ describe('Ganon Integration Tests', () => {
   });
 
   describe('Hydration Protection', () => {
-    it('should not mark keys as pending during hydration', async () => {
-      // Set identifier key to simulate user being logged in
-      ganon.set('user', { id: '123', name: 'Test User', email: 'test@example.com' });
-      expect(ganon.get('user')).toEqual({ id: '123', name: 'Test User', email: 'test@example.com' });
-      expect(ganon.isUserLoggedIn()).toBe(true);
+    it('reports hydration in progress via isHydrationInProgress', () => {
+      const syncEngine = (ganon as any).syncEngine;
 
-      // Simulate hydration by accessing the internal sync controller
-      const syncController = (ganon as any).syncController;
-
-      // Start hydration (set the flag)
-      (syncController as any).isHydrating = true;
-
-      // Try to set data during hydration
-      ganon.set('user', { id: '123', name: 'Test User', email: 'test@example.com' });
-
-      // Verify that the set operation completed without error during hydration
-      expect(ganon.get('user')).toEqual({ id: '123', name: 'Test User', email: 'test@example.com' });
-
-      // Clear hydration flag
-      (syncController as any).isHydrating = false;
-    });
-
-    it('should not mark keys as pending during upsert hydration', async () => {
-      // Set identifier key to simulate user being logged in
-      ganon.set('user', { id: '123', name: 'Test User', email: 'test@example.com' });
-      expect(ganon.get('user')).toEqual({ id: '123', name: 'Test User', email: 'test@example.com' });
-      expect(ganon.isUserLoggedIn()).toBe(true);
-
-      // Simulate hydration by accessing the internal sync controller
-      const syncController = (ganon as any).syncController;
-
-      // Start hydration (set the flag)
-      (syncController as any).isHydrating = true;
-
-      // Try to upsert data during hydration
-      ganon.upsert('user', { id: '123', name: 'Test User', email: 'test@example.com' });
-
-      // Verify that the upsert operation completed without error during hydration
-      const user = ganon.get('user');
-      expect(user).toBeDefined();
-      expect(user!.name).toBe('Test User');
-
-      // Clear hydration flag
-      (syncController as any).isHydrating = false;
+      expect(syncEngine.isHydrationInProgress()).toBe(false);
+      (syncEngine as any).hydrationPromise = new Promise(() => {});
+      expect(syncEngine.isHydrationInProgress()).toBe(true);
+      (syncEngine as any).hydrationPromise = null;
+      expect(syncEngine.isHydrationInProgress()).toBe(false);
     });
 
     it('should properly manage hydration state', async () => {
-      const syncController = (ganon as any).syncController;
+      const syncEngine = (ganon as any).syncEngine;
 
       // Initially not hydrating
-      expect((syncController as any).hydrationPromise).toBeNull();
+      expect((syncEngine as any).hydrationPromise).toBeNull();
 
       // Simulate hydration start
-      (syncController as any).hydrationPromise = Promise.resolve();
-      expect((syncController as any).hydrationPromise).toBeDefined();
+      (syncEngine as any).hydrationPromise = Promise.resolve();
+      expect((syncEngine as any).hydrationPromise).toBeDefined();
 
       // Simulate hydration end
-      (syncController as any).hydrationPromise = null;
-      expect((syncController as any).hydrationPromise).toBeNull();
+      (syncEngine as any).hydrationPromise = null;
+      expect((syncEngine as any).hydrationPromise).toBeNull();
     });
 
     it('should wait for hydration to complete before backup', async () => {
-      const syncController = (ganon as any).syncController;
+      const syncEngine = (ganon as any).syncEngine;
 
       // Mock the backup method to track calls and execution
-      const originalBackup = syncController.syncAll;
+      const originalBackup = syncEngine.syncAll;
       let backupStarted = false;
       let backupExecuted = false;
 
@@ -344,7 +308,7 @@ describe('Ganon Integration Tests', () => {
         resolveBackup = resolve;
       });
 
-      syncController.syncAll = jest.fn().mockImplementation(async () => {
+      syncEngine.syncAll = jest.fn().mockImplementation(async () => {
         backupStarted = true;
         // Wait for hydration to complete before executing backup
         await backupPromise;
@@ -353,7 +317,7 @@ describe('Ganon Integration Tests', () => {
       });
 
       // Start hydration
-      (syncController as any).hydrationPromise = Promise.resolve();
+      (syncEngine as any).hydrationPromise = Promise.resolve();
 
       // Call backup - this should start immediately
       const resultPromise = ganon.backup();
@@ -364,7 +328,7 @@ describe('Ganon Integration Tests', () => {
 
       // End hydration after a short delay
       setTimeout(() => {
-        (syncController as any).hydrationPromise = null;
+        (syncEngine as any).hydrationPromise = null;
         resolveBackup!(); // Resolve the backup promise to allow execution
       }, 10);
 
@@ -373,7 +337,7 @@ describe('Ganon Integration Tests', () => {
       expect(backupExecuted).toBe(true);
 
       // Restore original method
-      syncController.syncAll = originalBackup;
+      syncEngine.syncAll = originalBackup;
     });
 
     it('should wait for hydration to complete before restore', async () => {
@@ -381,10 +345,10 @@ describe('Ganon Integration Tests', () => {
       ganon.set('user', { id: '123', name: 'Test User', email: 'test@example.com' });
       expect(ganon.isUserLoggedIn()).toBe(true);
 
-      const syncController = (ganon as any).syncController;
+      const syncEngine = (ganon as any).syncEngine;
 
       // Mock the restore method to track calls and execution
-      const originalRestore = syncController.restore;
+      const originalRestore = syncEngine.restore;
       let restoreStarted = false;
       let restoreExecuted = false;
 
@@ -394,7 +358,7 @@ describe('Ganon Integration Tests', () => {
         resolveRestore = resolve;
       });
 
-      syncController.restore = jest.fn().mockImplementation(async () => {
+      syncEngine.restore = jest.fn().mockImplementation(async () => {
         restoreStarted = true;
         // Wait for hydration to complete before executing restore
         await hydrationPromise;
@@ -403,7 +367,7 @@ describe('Ganon Integration Tests', () => {
       });
 
       // Start hydration
-      (syncController as any).hydrationPromise = Promise.resolve();
+      (syncEngine as any).hydrationPromise = Promise.resolve();
 
       // Call restore - this should start immediately
       const restoreResult = ganon.restore();
@@ -414,7 +378,7 @@ describe('Ganon Integration Tests', () => {
 
       // End hydration after a short delay
       setTimeout(() => {
-        (syncController as any).hydrationPromise = null;
+        (syncEngine as any).hydrationPromise = null;
         resolveRestore!(); // Resolve the hydration promise to allow execution
       }, 10);
 
@@ -423,7 +387,7 @@ describe('Ganon Integration Tests', () => {
       expect(restoreExecuted).toBe(true);
 
       // Restore original method
-      syncController.restore = originalRestore;
+      syncEngine.restore = originalRestore;
     });
 
     it('should timeout if hydration takes too long for restore', async () => {
@@ -431,17 +395,17 @@ describe('Ganon Integration Tests', () => {
       ganon.set('user', { id: '123', name: 'Test User', email: 'test@example.com' });
       expect(ganon.isUserLoggedIn()).toBe(true);
 
-      const syncController = (ganon as any).syncController;
+      const syncEngine = (ganon as any).syncEngine;
 
       // Start hydration and keep it running
-      (syncController as any).hydrationPromise = new Promise(() => {}); // Never resolves
+      (syncEngine as any).hydrationPromise = new Promise(() => {}); // Never resolves
 
       // Call restore
       const restoreResult = ganon.restore();
 
       // Quickly end hydration so the test doesn't take forever
       setTimeout(() => {
-        (syncController as any).hydrationPromise = null;
+        (syncEngine as any).hydrationPromise = null;
       }, 10);
 
       // Should complete and return a result
@@ -450,21 +414,21 @@ describe('Ganon Integration Tests', () => {
     });
 
     it('should timeout if hydration takes too long for backup', async () => {
-      const syncController = (ganon as any).syncController;
+      const syncEngine = (ganon as any).syncEngine;
 
       // Mock the backup method to resolve quickly
-      const originalBackup = syncController.syncAll;
-      syncController.syncAll = jest.fn().mockResolvedValue({ success: true, backedUpKeys: [], failedKeys: [], timestamp: new Date() });
+      const originalBackup = syncEngine.syncAll;
+      syncEngine.syncAll = jest.fn().mockResolvedValue({ success: true, backedUpKeys: [], failedKeys: [], timestamp: new Date() });
 
       // Start hydration with a promise that takes a bit longer than our test timeout
-      (syncController as any).hydrationPromise = new Promise(resolve => setTimeout(resolve, 100));
+      (syncEngine as any).hydrationPromise = new Promise(resolve => setTimeout(resolve, 100));
 
       // Try to backup - this should timeout quickly
       const backupPromise = ganon.backup();
 
       // End hydration after a short delay
       setTimeout(() => {
-        (syncController as any).hydrationPromise = null;
+        (syncEngine as any).hydrationPromise = null;
       }, 50);
 
       // Should complete and return a result
@@ -472,14 +436,14 @@ describe('Ganon Integration Tests', () => {
       expect(result).toBeDefined();
 
       // Restore original method
-      syncController.syncAll = originalBackup;
+      syncEngine.syncAll = originalBackup;
     }, 1000); // Add a 1 second timeout for this test
 
     it('should trigger hydration automatically when identifier key is set', async () => {
-      const syncController = (ganon as any).syncController;
+      const syncEngine = (ganon as any).syncEngine;
 
       // Initially not hydrating
-      expect((syncController as any).hydrationPromise).toBeNull();
+      expect((syncEngine as any).hydrationPromise).toBeNull();
 
       // Set identifier key which should log the user in and trigger hydration
       ganon.set('user', { id: '123', name: 'Test User', email: 'test@example.com' });
@@ -488,11 +452,11 @@ describe('Ganon Integration Tests', () => {
       expect(ganon.isUserLoggedIn()).toBe(true);
 
       // Hydration should be triggered automatically when identifier key is set
-      expect((syncController as any).hydrationPromise).toBeDefined();
+      expect((syncEngine as any).hydrationPromise).toBeDefined();
 
       // End hydration
-      (syncController as any).hydrationPromise = null;
-      expect((syncController as any).hydrationPromise).toBeNull();
+      (syncEngine as any).hydrationPromise = null;
+      expect((syncEngine as any).hydrationPromise).toBeNull();
     });
   });
 
@@ -505,7 +469,7 @@ describe('Ganon Integration Tests', () => {
 
     it('should force hydrate specific keys regardless of version comparison', async () => {
       // Mock the sync controller's forceHydrate method
-      const syncController = (ganon as any).syncController;
+      const syncEngine = (ganon as any).syncEngine;
       const mockForceHydrate = jest.fn().mockResolvedValue({
         success: true,
         restoredKeys: ['workouts', 'exercises'],
@@ -513,7 +477,7 @@ describe('Ganon Integration Tests', () => {
         integrityFailures: [],
         timestamp: new Date()
       });
-      syncController.forceHydrate = mockForceHydrate;
+      syncEngine.forceHydrate = mockForceHydrate;
 
       // Execute force hydration
       const result = await ganon.forceHydrate(['workouts', 'exercises']);
@@ -528,7 +492,7 @@ describe('Ganon Integration Tests', () => {
 
     it('should handle force hydration failures gracefully', async () => {
       // Mock the sync controller's forceHydrate method to fail
-      const syncController = (ganon as any).syncController;
+      const syncEngine = (ganon as any).syncEngine;
       const mockForceHydrate = jest.fn().mockResolvedValue({
         success: false,
         restoredKeys: [],
@@ -536,7 +500,7 @@ describe('Ganon Integration Tests', () => {
         integrityFailures: [],
         timestamp: new Date()
       });
-      syncController.forceHydrate = mockForceHydrate;
+      syncEngine.forceHydrate = mockForceHydrate;
 
       // Execute force hydration
       const result = await ganon.forceHydrate(['workouts']);
@@ -556,7 +520,7 @@ describe('Ganon Integration Tests', () => {
 
     it('should handle force hydration with empty keys array', async () => {
       // Mock the sync controller's forceHydrate method
-      const syncController = (ganon as any).syncController;
+      const syncEngine = (ganon as any).syncEngine;
       const mockForceHydrate = jest.fn().mockResolvedValue({
         success: true,
         restoredKeys: [],
@@ -564,7 +528,7 @@ describe('Ganon Integration Tests', () => {
         integrityFailures: [],
         timestamp: new Date()
       });
-      syncController.forceHydrate = mockForceHydrate;
+      syncEngine.forceHydrate = mockForceHydrate;
 
       // Execute force hydration with empty array
       const result = await ganon.forceHydrate([]);
@@ -578,9 +542,9 @@ describe('Ganon Integration Tests', () => {
 
     it('should handle force hydration with sync controller errors', async () => {
       // Mock the sync controller's forceHydrate method to throw
-      const syncController = (ganon as any).syncController;
+      const syncEngine = (ganon as any).syncEngine;
       const mockForceHydrate = jest.fn().mockRejectedValue(new Error('Sync controller error'));
-      syncController.forceHydrate = mockForceHydrate;
+      syncEngine.forceHydrate = mockForceHydrate;
 
       // Execute force hydration
       await expect(ganon.forceHydrate(['workouts'])).rejects.toThrow('Force hydration operation failed: Error: Sync controller error');
@@ -589,10 +553,10 @@ describe('Ganon Integration Tests', () => {
 
     it('should handle force hydration with SyncError', async () => {
       // Mock the sync controller's forceHydrate method to throw SyncError
-      const syncController = (ganon as any).syncController;
+      const syncEngine = (ganon as any).syncEngine;
       const SyncError = require('../../errors/SyncError').default;
       const mockForceHydrate = jest.fn().mockRejectedValue(new SyncError('Sync error', 'SyncFailed'));
-      syncController.forceHydrate = mockForceHydrate;
+      syncEngine.forceHydrate = mockForceHydrate;
 
       // Execute force hydration
       await expect(ganon.forceHydrate(['workouts'])).rejects.toThrow('Sync error');
@@ -609,7 +573,7 @@ describe('Ganon Integration Tests', () => {
 
     it('should hydrate with fresh cache invalidation', async () => {
       // Mock the sync controller's hydrate method
-      const syncController = (ganon as any).syncController;
+      const syncEngine = (ganon as any).syncEngine;
       const mockHydrate = jest.fn().mockResolvedValue({
         success: true,
         restoredKeys: ['workouts'],
@@ -617,7 +581,7 @@ describe('Ganon Integration Tests', () => {
         integrityFailures: [],
         timestamp: new Date()
       });
-      syncController.hydrate = mockHydrate;
+      syncEngine.hydrate = mockHydrate;
 
       // Execute hydration
       const result = await ganon.hydrate(['workouts']);
@@ -631,9 +595,9 @@ describe('Ganon Integration Tests', () => {
 
     it('should handle hydration with cache invalidation errors', async () => {
       // Mock the sync controller's hydrate method to throw
-      const syncController = (ganon as any).syncController;
+      const syncEngine = (ganon as any).syncEngine;
       const mockHydrate = jest.fn().mockRejectedValue(new Error('Cache invalidation error'));
-      syncController.hydrate = mockHydrate;
+      syncEngine.hydrate = mockHydrate;
 
       // Execute hydration
       await expect(ganon.hydrate(['workouts'])).rejects.toThrow('Hydration operation failed: Error: Cache invalidation error');
@@ -642,10 +606,10 @@ describe('Ganon Integration Tests', () => {
 
     it('should handle hydration with SyncError from cache invalidation', async () => {
       // Mock the sync controller's hydrate method to throw SyncError
-      const syncController = (ganon as any).syncController;
+      const syncEngine = (ganon as any).syncEngine;
       const SyncError = require('../../errors/SyncError').default;
       const mockHydrate = jest.fn().mockRejectedValue(new SyncError('Cache sync error', 'SyncFailed'));
-      syncController.hydrate = mockHydrate;
+      syncEngine.hydrate = mockHydrate;
 
       // Execute hydration
       await expect(ganon.hydrate(['workouts'])).rejects.toThrow('Cache sync error');
@@ -654,7 +618,7 @@ describe('Ganon Integration Tests', () => {
 
     it('should hydrate all keys when no specific keys provided', async () => {
       // Mock the sync controller's hydrate method
-      const syncController = (ganon as any).syncController;
+      const syncEngine = (ganon as any).syncEngine;
       const mockHydrate = jest.fn().mockResolvedValue({
         success: true,
         restoredKeys: ['workouts', 'exercises', 'user'],
@@ -662,7 +626,7 @@ describe('Ganon Integration Tests', () => {
         integrityFailures: [],
         timestamp: new Date()
       });
-      syncController.hydrate = mockHydrate;
+      syncEngine.hydrate = mockHydrate;
 
       // Execute hydration without specific keys
       const result = await ganon.hydrate();
@@ -678,7 +642,7 @@ describe('Ganon Integration Tests', () => {
 
     it('should handle hydration with partial failures', async () => {
       // Mock the sync controller's hydrate method
-      const syncController = (ganon as any).syncController;
+      const syncEngine = (ganon as any).syncEngine;
       const mockHydrate = jest.fn().mockResolvedValue({
         success: false,
         restoredKeys: ['workouts'],
@@ -686,7 +650,7 @@ describe('Ganon Integration Tests', () => {
         integrityFailures: [],
         timestamp: new Date()
       });
-      syncController.hydrate = mockHydrate;
+      syncEngine.hydrate = mockHydrate;
 
       // Execute hydration
       const result = await ganon.hydrate(['workouts', 'exercises']);
@@ -704,7 +668,7 @@ describe('Ganon Integration Tests', () => {
       expect(ganon.isUserLoggedIn()).toBe(false);
 
       // Mock the sync controller's hydrate method
-      const syncController = (ganon as any).syncController;
+      const syncEngine = (ganon as any).syncEngine;
       const mockHydrate = jest.fn().mockResolvedValue({
         success: false,
         restoredKeys: [],
@@ -712,7 +676,7 @@ describe('Ganon Integration Tests', () => {
         integrityFailures: [],
         timestamp: new Date()
       });
-      syncController.hydrate = mockHydrate;
+      syncEngine.hydrate = mockHydrate;
 
       // Execute hydration
       const result = await ganon.hydrate(['workouts']);
