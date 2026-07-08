@@ -13,6 +13,7 @@ export type { BaseStorageMapping } from './models/storage/BaseStorageMapping';
 export { SyncStatus } from './models/sync/SyncStatus';
 export type { BackupResult } from './models/sync/BackupResult';
 export type { RestoreResult, IntegrityFailureInfo } from './models/sync/RestoreResult';
+export type { HydrationWaitReason } from './models/sync/HydrationWaitReason';
 export type { IGanon } from './models/interfaces/IGanon';
 export type {
   GanonEventName,

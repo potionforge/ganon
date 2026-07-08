@@ -44,6 +44,12 @@ const mockSyncEngine: any = {
     failedKeys: [],
     integrityFailures: [],
   }),
+  hydrate: jest.fn().mockResolvedValue({
+    success: true,
+    restoredKeys: [],
+    failedKeys: [],
+    integrityFailures: [],
+  }),
   hasAnyRemoteData: jest.fn(),
 };
 
@@ -112,8 +118,10 @@ describe('Ganon whenHydrated lifecycle', () => {
     await Promise.resolve();
 
     let settled = false;
-    void ganon.whenHydrated().then(() => {
+    let reason: string | undefined;
+    void ganon.whenHydrated().then(r => {
       settled = true;
+      reason = r;
     });
     await Promise.resolve();
     expect(settled).toBe(false);
@@ -123,6 +131,38 @@ describe('Ganon whenHydrated lifecycle', () => {
 
     await Promise.resolve();
     expect(settled).toBe(true);
+    expect(reason).toBe('logged-out');
+  });
+
+  it('logged-out hydrate() does not settle pre-login whenHydrated() waiters', async () => {
+    const ganon = createGanon({ autoStartSync: false });
+    mockUserManager.isUserLoggedIn.mockReturnValue(false);
+
+    let settled = false;
+    void ganon.whenHydrated().then(() => {
+      settled = true;
+    });
+    await Promise.resolve();
+    expect(settled).toBe(false);
+
+    mockSyncEngine.hydrate.mockImplementation(async () => {
+      capturedInternalConfig?.eventCallbacks?.onHydrationComplete?.({
+        success: true,
+        restoredKeys: [],
+        failedKeys: [],
+        integrityFailures: [],
+      });
+      return {
+        success: true,
+        restoredKeys: [],
+        failedKeys: [],
+        integrityFailures: [],
+      };
+    });
+
+    await ganon.hydrate();
+    await Promise.resolve();
+    expect(settled).toBe(false);
   });
 
   it('is pending during login restore until restore settles (autoStartSync off)', async () => {
@@ -142,8 +182,10 @@ describe('Ganon whenHydrated lifecycle', () => {
     await Promise.resolve();
 
     let settled = false;
-    void ganon.whenHydrated().then(() => {
+    let reason: string | undefined;
+    void ganon.whenHydrated().then(r => {
       settled = true;
+      reason = r;
     });
     await Promise.resolve();
     expect(settled).toBe(false);
@@ -151,6 +193,7 @@ describe('Ganon whenHydrated lifecycle', () => {
     await loginPromise;
     await Promise.resolve();
     expect(settled).toBe(true);
+    expect(reason).toBe('hydrated');
   });
 
   it('earlyWriteGuard and whenHydrated share hydration-pending (throws on consumer set during login restore)', async () => {
@@ -190,6 +233,6 @@ describe('Ganon whenHydrated lifecycle', () => {
     });
 
     await expect(ganon.login('u1')).resolves.toBe('restore');
-    await expect(ganon.whenHydrated()).resolves.toBeUndefined();
+    await expect(ganon.whenHydrated()).resolves.toBe('hydrated');
   });
 });

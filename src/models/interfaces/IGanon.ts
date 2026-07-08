@@ -3,6 +3,7 @@ import { BackupResult } from "../sync/BackupResult";
 import { RestoreResult } from "../sync/RestoreResult";
 import { IntegrityFailureConfig } from "../config/IntegrityFailureConfig";
 import { ConflictResolutionConfig } from "../config/ConflictResolutionConfig";
+import type { HydrationWaitReason } from "../sync/HydrationWaitReason";
 import type { GanonEventName, GanonEventListener } from "../events/GanonEvents";
 
 export interface IGanon<T extends BaseStorageMapping> {
@@ -18,7 +19,7 @@ export interface IGanon<T extends BaseStorageMapping> {
   login(userId: string): Promise<'noop' | 'restore' | 'backup'>;
   logout(options?: { backup?: boolean }): Promise<void>;
   isUserLoggedIn(): boolean;
-  whenHydrated(): Promise<void>;
+  whenHydrated(): Promise<HydrationWaitReason>;
 
   // Sync operations
   startSync(): void;
