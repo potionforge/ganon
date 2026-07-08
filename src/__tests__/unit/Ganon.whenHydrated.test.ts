@@ -366,6 +366,65 @@ describe('Ganon whenHydrated lifecycle', () => {
     await expect(ganon.whenHydrated()).resolves.toBe('hydrated');
   });
 
+  it('stopSync after hydration completed: startSync re-arm blocks whenHydrated until resumed pass settles', async () => {
+    const ganon = createGanon({ autoStartSync: true });
+    mockSyncEngine.hasAnyRemoteData.mockResolvedValue(true);
+    mockUserManager.isUserLoggedIn.mockImplementation(() => mockStorageManager.get('email') != null);
+    mockStorageManager.set.mockImplementation((key: string, value: string) => {
+      if (key === 'email') {
+        mockStorageManager.get.mockImplementation((k: string) => (k === 'email' ? value : undefined));
+      }
+    });
+    mockSyncEngine.restore.mockResolvedValue({
+      success: true,
+      restoredKeys: ['settings'],
+      failedKeys: [],
+      integrityFailures: [],
+    });
+
+    let autoComplete = true;
+    mockSyncEngine.start.mockImplementation(() => {
+      if (autoComplete) {
+        capturedInternalConfig?.eventCallbacks?.onHydrationComplete?.({
+          success: true,
+          restoredKeys: [],
+          failedKeys: [],
+          integrityFailures: [],
+        });
+      }
+    });
+
+    // Initial login hydrates to completion — settle reason is 'hydrated'.
+    await ganon.login('u1');
+    await expect(ganon.whenHydrated()).resolves.toBe('hydrated');
+
+    // Stop AFTER hydration already settled: no pending waiters, reason stays 'hydrated'.
+    ganon.stopSync();
+
+    // Resume: the re-fired hydrate pass is still running (does not auto-complete).
+    autoComplete = false;
+    ganon.startSync();
+
+    // Regression guard: whenHydrated() must NOT report 'hydrated' while the resumed pass runs.
+    let resolved = false;
+    const waiter = ganon.whenHydrated().then(r => {
+      resolved = true;
+      return r;
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(resolved).toBe(false);
+
+    // Completing the resumed pass settles the waiter honestly.
+    capturedInternalConfig?.eventCallbacks?.onHydrationComplete?.({
+      success: true,
+      restoredKeys: [],
+      failedKeys: [],
+      integrityFailures: [],
+    });
+    await expect(waiter).resolves.toBe('hydrated');
+  });
+
   it('logout after stopSync resets stopped reason so re-login reaches hydrated', async () => {
     const ganon = createGanon({ autoStartSync: false });
     mockSyncEngine.hasAnyRemoteData.mockResolvedValue(true);
