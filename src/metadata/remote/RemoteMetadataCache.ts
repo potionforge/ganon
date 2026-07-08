@@ -18,11 +18,14 @@ interface CacheState {
 
 /**
  * Read-side remote metadata cache with TTL and in-flight fetch dedupe.
+ * Epoch invalidation discards in-flight fetch write-backs (same pattern as hydration generation).
  */
 export default class RemoteMetadataCache<T extends BaseStorageMapping> {
   private cache: CacheState = { data: {}, lastFetchTime: 0, invalidated: true };
   private fetchPromise: Promise<void> | null = null;
   private docRef: FirebaseFirestoreTypes.DocumentReference | null = null;
+  /** Bumped on invalidate(); in-flight fetches capture epoch at start and skip write-back if it changed. */
+  private epoch = 0;
 
   constructor(
     private referenceManager: FirestoreReferenceManager<T>,
@@ -51,19 +54,29 @@ export default class RemoteMetadataCache<T extends BaseStorageMapping> {
       return this.cache.data;
     }
 
-    this.fetchPromise = this._doFetch(keys);
+    const fetchPromise = this._doFetch(keys);
+    this.fetchPromise = fetchPromise;
     try {
-      await this.fetchPromise;
+      await fetchPromise;
     } finally {
-      this.fetchPromise = null;
+      // Only clear our own handle. invalidate() may have released it mid-flight and a
+      // fresh fetch may now own fetchPromise — don't clobber the newer in-flight handle
+      // (same identity guard as hydrationPromise's generation-checked finally).
+      if (this.fetchPromise === fetchPromise) {
+        this.fetchPromise = null;
+      }
     }
     return this.cache.data;
   }
 
-  /** Lazy invalidation: mark stale; next fetch refetches (no immediate network read). */
+  /** Lazy invalidation: mark stale and bump epoch so in-flight fetches discard write-back. */
   invalidate(): void {
+    this.epoch += 1;
     this.cache.invalidated = true;
     this.cache.lastFetchTime = 0;
+    // Release the dedupe handle so a subsequent fetch() runs fresh instead of awaiting the
+    // now epoch-dead in-flight fetch (mirrors SyncEngine.stop() releasing hydrationPromise).
+    this.fetchPromise = null;
   }
 
   getCached(): MetadataStorage {
@@ -90,7 +103,11 @@ export default class RemoteMetadataCache<T extends BaseStorageMapping> {
   }
 
   private async _doFetch(specificKeys?: string[]): Promise<void> {
+    const fetchEpoch = this.epoch;
     const doc = await this.adapter.getDocument(this._getDocRef());
+    if (fetchEpoch !== this.epoch) {
+      return;
+    }
     if (doc.exists) {
       const docData = doc.data() ?? {};
       const legacyMetadata = (docData[REMOTE_METADATA_KEY] as MetadataStorage) || {};

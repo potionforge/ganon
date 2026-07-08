@@ -59,7 +59,7 @@ export class MockMetadataManager<T extends BaseStorageMapping> extends MetadataM
   }
 
   // Implement required async methods from MetadataManager
-  async hydrateMetadata(): Promise<void> {
+  async hydrateMetadata(_session: { isStale(): boolean }): Promise<void> {
     // No-op for tests
   }
 

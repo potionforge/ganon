@@ -56,7 +56,7 @@ export default class MetadataManager<T extends BaseStorageMapping> {
     coordinator.updateSyncStatus(key, status);
   }
 
-  async hydrateMetadata(): Promise<void> {
+  async hydrateMetadata(session: { isStale(): boolean }): Promise<void> {
     Log.info('Ganon: MetadataManager.hydrateMetadata');
     if (!this.config?.cloudConfig) return;
 
@@ -67,6 +67,10 @@ export default class MetadataManager<T extends BaseStorageMapping> {
     // One fetch per document: lazy invalidate then refresh
     coordinators.forEach(coordinator => coordinator.invalidateCache());
     await Promise.all(coordinators.map(coordinator => coordinator.refreshCache()));
+    if (session.isStale()) {
+      // Stale pass: pure no-op — do not seed or clear lastRemoteSnapshot (teardown owns cleanup).
+      return;
+    }
     this.lastRemoteSnapshot = {};
     for (const coordinator of coordinators) {
       Object.assign(this.lastRemoteSnapshot, coordinator.getCachedRemote());
@@ -138,6 +142,25 @@ export default class MetadataManager<T extends BaseStorageMapping> {
     const coordinator = this._getCoordinator(key);
     if (!coordinator) return;
     coordinator.invalidateCache();
+  }
+
+  /**
+   * Invalidate in-memory remote metadata caches on all coordinators (no flush cancel).
+   * Used by SyncEngine.stop() so teardown clears stale coordinator cache without dropping
+   * MetadataFlushQueue debounced legacy-map flushes — those stay owned by cancelPendingOperations().
+   */
+  invalidateAllRemoteCaches(): void {
+    Log.verbose('Ganon: MetadataManager.invalidateAllRemoteCaches');
+    if (!this.config?.cloudConfig) {
+      return;
+    }
+
+    Object.keys(this.config.cloudConfig).forEach(documentName => {
+      const coordinator = this.coordinatorRepo.getCoordinator(documentName as Extract<keyof T, string>);
+      if (coordinator) {
+        coordinator.invalidateCache();
+      }
+    });
   }
 
   /**

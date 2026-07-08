@@ -214,5 +214,56 @@ describe('MetadataManager Tests', () => {
       expect(result).toBeUndefined();
       expect(mockCoordinator.getRemoteMetadata).not.toHaveBeenCalled();
     });
+
+    it('hydrateMetadata populates lastRemoteSnapshot when session is current after refresh', async () => {
+      mockCoordinator.refreshCache = jest.fn().mockResolvedValue(undefined);
+      mockCoordinator.getCachedRemote = jest.fn().mockReturnValue({
+        workouts: { d: 'remote-digest', v: 2 },
+      });
+
+      const session = { isStale: () => false };
+      await metadataManager.hydrateMetadata(session);
+
+      expect(metadataManager.getRemoteMetaForKey('workouts')).toEqual({
+        d: 'remote-digest',
+        v: 2,
+      });
+    });
+
+    it('hydrateMetadata stale refresh does not clobber a fresh session snapshot', async () => {
+      let releaseStaleRefresh!: () => void;
+      const staleRefreshGate = new Promise<void>(resolve => {
+        releaseStaleRefresh = resolve;
+      });
+
+      mockCoordinator.refreshCache = jest
+        .fn()
+        .mockImplementationOnce(() => staleRefreshGate)
+        .mockImplementationOnce(() => Promise.resolve(undefined));
+      mockCoordinator.getCachedRemote = jest
+        .fn()
+        .mockReturnValueOnce({ workouts: { d: 'orphan-digest', v: 99 } })
+        .mockReturnValueOnce({ workouts: { d: 'fresh-digest', v: 2 } });
+
+      const staleSession = { isStale: () => true };
+      const freshSession = { isStale: () => false };
+
+      const stalePromise = metadataManager.hydrateMetadata(staleSession);
+      await Promise.resolve();
+
+      await metadataManager.hydrateMetadata(freshSession);
+      expect(metadataManager.getRemoteMetaForKey('workouts')).toEqual({
+        d: 'fresh-digest',
+        v: 2,
+      });
+
+      releaseStaleRefresh();
+      await stalePromise;
+
+      expect(metadataManager.getRemoteMetaForKey('workouts')).toEqual({
+        d: 'fresh-digest',
+        v: 2,
+      });
+    });
   });
 });
