@@ -1,4 +1,7 @@
 import { selectRemoteDigest } from '../../metadata/digest/selectRemoteDigest';
+import Log from '../../utils/Log';
+
+jest.mock('../../utils/Log');
 
 describe('selectRemoteDigest', () => {
   const legacy = { d: 'legacy-digest', v: 1 };
@@ -32,6 +35,16 @@ describe('selectRemoteDigest', () => {
     expect(
       selectRemoteDigest({ d: 'legacy', v: 5 }, { d: 'indoc', v: 5 }, 'dual')
     ).toEqual({ d: 'indoc', v: 5 });
+  });
+
+  it('dual mode equal version with mismatched digests warns and prefers in-document', () => {
+    jest.mocked(Log.warn).mockClear();
+    expect(
+      selectRemoteDigest({ d: 'legacy', v: 5 }, { d: 'indoc', v: 5 }, 'dual')
+    ).toEqual({ d: 'indoc', v: 5 });
+    expect(Log.warn).toHaveBeenCalledWith(
+      'Ganon: selectRemoteDigest equal version 5 with mismatched digests (legacy=legacy, inDocument=indoc); preferring in-document'
+    );
   });
 
   it('falls back when only one source exists', () => {
