@@ -104,10 +104,11 @@ export default class MetadataFlushQueue<T extends BaseStorageMapping> {
   }
 
   private async _batchUpdateRemote(updates: MetadataStorage): Promise<void> {
-    const mergedMetadata = { ...this.remoteCache.getCached(), ...updates };
+    // Write only pending keys; merge:true deep-merges nested map entries server-side.
+    // Do not spread remoteCache — that re-asserts stale entries for keys we did not change.
     await this.adapter.setDocument(
       this._getDocRef(),
-      { [REMOTE_METADATA_KEY]: mergedMetadata },
+      { [REMOTE_METADATA_KEY]: updates },
       { merge: true }
     );
   }

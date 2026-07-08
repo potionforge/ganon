@@ -29,6 +29,12 @@ import { Clock, SystemClock } from "../ports/Clock";
 import { CancelHandle, Scheduler, SystemScheduler } from "../ports/Scheduler";
 import KeyRouter from "../routing/KeyRouter";
 
+/** Debounce delay for batched markAsPending → metadata flush scheduling. */
+export const MARK_AS_PENDING_DEBOUNCE_MS = 50;
+
+/** recoveryStrategy when integrity recovery is skipped due to stale hydration session. */
+const STALE_HYDRATION_RECOVERY_STRATEGY = 'stale_session';
+
 /**
  * Controller responsible for managing synchronization between local storage and Firestore.
  * Handles operations like backup, restore, and hydration of data.
@@ -41,7 +47,7 @@ export default class SyncEngine<T extends BaseStorageMapping> implements ISyncEn
   // Debounce batching for markAsPending
   private _pendingMarkKeys: Set<Extract<keyof T, string>> = new Set();
   private _markDebounceHandle: CancelHandle | null = null;
-  private readonly _MARK_DEBOUNCE_DELAY = 50; // ms
+  private readonly _MARK_DEBOUNCE_DELAY = MARK_AS_PENDING_DEBOUNCE_MS;
 
   // Per-invocation integrity config
   private _currentIntegrityConfig?: Partial<IntegrityFailureConfig>;
@@ -54,6 +60,10 @@ export default class SyncEngine<T extends BaseStorageMapping> implements ISyncEn
 
   private keyRouter: KeyRouter<T>;
   private resolvedConfig: ResolvedGanonConfig<T>;
+  /** True after start() arms the engine; cleared by stop(). Idempotent start while running. */
+  private running = false;
+  /** Bumped on stop() to invalidate in-flight hydrate passes across identity boundaries. */
+  private hydrationGeneration = 0;
 
   constructor(
     private storage: StorageManager<T>,
@@ -76,6 +86,11 @@ export default class SyncEngine<T extends BaseStorageMapping> implements ISyncEn
    * Constructor is side-effect free (step 7).
    */
   start(): void {
+    if (this.running) {
+      Log.verbose('Ganon: SyncEngine.start skipped — already running');
+      return;
+    }
+    this.running = true;
 
     if (this.resolvedConfig.autoStartSync) {
       this.startSyncInterval();
@@ -86,6 +101,38 @@ export default class SyncEngine<T extends BaseStorageMapping> implements ISyncEn
         Log.error(`Ganon: error hydrating on start: ${err}`);
       });
     }
+  }
+
+  /**
+   * Stops sync interval and clears running state so a later start() fully re-arms.
+   * Called on logout teardown; distinct from stopSyncInterval() alone.
+   *
+   * Teardown semantics: discards the pending markAsPending set rather than flushing
+   * it. Flushing here would route through recordLocalChange -> flushQueue.enqueue and
+   * re-arm a remote flush against the session being torn down (the hazard this method
+   * exists to prevent), so a bare stop() intentionally drops unflushed marks. Callers
+   * that need recent edits captured should run backup()/syncAll() first — syncAll
+   * synchronously flushes pending marks before processOperations().
+   */
+  stop(): void {
+    Log.verbose('Ganon: SyncEngine.stop');
+    this.running = false;
+    this.hydrationGeneration += 1;
+    // Release the dedupe handle so a later start()/hydrate() runs a fresh pass instead of
+    // awaiting the now generation-dead in-flight promise. The orphaned pass still completes
+    // internally but its generation guard prevents any write or waiter settlement.
+    this.hydrationPromise = null;
+    // Cancel a debounced markAsPending flush so it can't fire against a torn-down session.
+    if (this._markDebounceHandle) {
+      this._markDebounceHandle.cancel();
+      this._markDebounceHandle = null;
+    }
+    this._pendingMarkKeys.clear();
+    this.stopSyncInterval();
+  }
+
+  private _isHydrationStale(generation: number): boolean {
+    return generation !== this.hydrationGeneration;
   }
 
   /**
@@ -220,12 +267,24 @@ export default class SyncEngine<T extends BaseStorageMapping> implements ISyncEn
       this._markDebounceHandle.cancel();
     }
     this._markDebounceHandle = this.scheduler.schedule(() => {
-      const keys = Array.from(this._pendingMarkKeys);
-      this._pendingMarkKeys.clear();
-      keys.forEach((pendingKey) => {
-        this._processMarkAsPending(pendingKey);
-      });
+      this._flushPendingMarks();
     }, this._MARK_DEBOUNCE_DELAY);
+  }
+
+  /** Cancel debounced markAsPending and process accumulated keys synchronously. */
+  private _flushPendingMarks(): void {
+    if (this._markDebounceHandle) {
+      this._markDebounceHandle.cancel();
+      this._markDebounceHandle = null;
+    }
+    if (this._pendingMarkKeys.size === 0) {
+      return;
+    }
+    const keys = Array.from(this._pendingMarkKeys);
+    this._pendingMarkKeys.clear();
+    keys.forEach((pendingKey) => {
+      this._processMarkAsPending(pendingKey);
+    });
   }
 
   private _processMarkAsPending(key: Extract<keyof T, string>): void {
@@ -342,6 +401,10 @@ export default class SyncEngine<T extends BaseStorageMapping> implements ISyncEn
         }
       }
 
+      // syncAll is an explicit "backup everything now" — flush debounced marks before
+      // processOperations so logout's backup() cannot race the ~50ms mark window.
+      this._flushPendingMarks();
+
       const results = await this.operationRepo.processOperations();
 
       const successfulResults = results ? results.filter(result => result.success) : [];
@@ -432,6 +495,8 @@ export default class SyncEngine<T extends BaseStorageMapping> implements ISyncEn
       return this._emptyRestoreResult;
     }
 
+    const hydrationGen = this.hydrationGeneration;
+
     // If hydration is already in progress, return the existing promise
     if (this.hydrationPromise) {
       Log.info("Ganon: hydration already in progress, returning existing promise");
@@ -440,14 +505,29 @@ export default class SyncEngine<T extends BaseStorageMapping> implements ISyncEn
 
     try {
       this.hydrationPromise = this._processKeys(async (key) => {
+        if (this._isHydrationStale(hydrationGen) || !this.userManager.isUserLoggedIn()) {
+          return false;
+        }
         const needsHydration = await this.metadataManager.needsHydration(key);
+        if (this._isHydrationStale(hydrationGen) || !this.userManager.isUserLoggedIn()) {
+          return false;
+        }
 
         if (needsHydration) {
+          if (this._isHydrationStale(hydrationGen) || !this.userManager.isUserLoggedIn()) {
+            return false;
+          }
           const remoteValue = await this.firestore.fetch(key);
+          if (this._isHydrationStale(hydrationGen) || !this.userManager.isUserLoggedIn()) {
+            return false;
+          }
           if (remoteValue !== undefined) {
             const remoteComputedDigest = computeHash(remoteValue);
             // For hydration, we want to get remote metadata without syncing local changes
             let remoteMetadata = await this.metadataManager.getRemoteMetadataOnly(key);
+            if (this._isHydrationStale(hydrationGen) || !this.userManager.isUserLoggedIn()) {
+              return false;
+            }
             if (!remoteMetadata) {
               Log.warn(`Ganon: No remote metadata for key ${key}, skipping hydration`);
               return true; // No metadata means nothing to compare; consider this a success
@@ -479,6 +559,9 @@ export default class SyncEngine<T extends BaseStorageMapping> implements ISyncEn
               }, config.strategy, config.mergeStrategy);
 
               if (resolution.success) {
+                if (this._isHydrationStale(hydrationGen) || !this.userManager.isUserLoggedIn()) {
+                  return false;
+                }
                 // Apply resolved value and update metadata
                 this.storage.set(key, resolution.resolvedValue!);
 
@@ -506,7 +589,13 @@ export default class SyncEngine<T extends BaseStorageMapping> implements ISyncEn
               const config = { ...this._integrityFailureConfig, ...this._currentIntegrityConfig };
 
               for (let attempt = 1; attempt <= config.maxRetries; attempt++) {
+                if (this._isHydrationStale(hydrationGen) || !this.userManager.isUserLoggedIn()) {
+                  return false;
+                }
                 const refreshedMetadata = await this.metadataManager.getRemoteMetadataOnly(key);
+                if (this._isHydrationStale(hydrationGen) || !this.userManager.isUserLoggedIn()) {
+                  return false;
+                }
                 if (refreshedMetadata && refreshedMetadata.digest === remoteComputedDigest) {
                   Log.info(`Ganon: Metadata sync successful on attempt ${attempt} for key ${key}`);
                   remoteMetadata = refreshedMetadata; // Update remoteMetadata with the refreshed version
@@ -514,14 +603,28 @@ export default class SyncEngine<T extends BaseStorageMapping> implements ISyncEn
                 }
 
                 if (attempt === config.maxRetries) {
+                  if (this._isHydrationStale(hydrationGen) || !this.userManager.isUserLoggedIn()) {
+                    return false;
+                  }
                   // Use the new integrity failure handling
                   const result = await this._handleIntegrityFailure(
                     key,
                     remoteComputedDigest,
                     remoteMetadata?.digest || 'unknown',
                     attempt,
-                    this._currentIntegrityConfig
+                    this._currentIntegrityConfig,
+                    hydrationGen
                   );
+
+                  // Session may have torn down while recovery awaited; generation is authoritative.
+                  if (this._isHydrationStale(hydrationGen) || !this.userManager.isUserLoggedIn()) {
+                    return false;
+                  }
+
+                  // Helper may return stale_session (includes logged-out where gen still matches); skip error log.
+                  if (result.recoveryStrategy === STALE_HYDRATION_RECOVERY_STRATEGY) {
+                    return false;
+                  }
 
                   if (result.success) {
                     Log.info(`✅ Ganon: Integrity failure recovery successful for key ${key} using strategy: ${result.recoveryStrategy}`);
@@ -539,6 +642,9 @@ export default class SyncEngine<T extends BaseStorageMapping> implements ISyncEn
 
             // Only store the data if we have valid remote metadata and the integrity check passed
             if (remoteMetadata && remoteComputedDigest === remoteMetadata.digest) {
+              if (this._isHydrationStale(hydrationGen) || !this.userManager.isUserLoggedIn()) {
+                return false;
+              }
               this.storage.set(key, remoteValue as T[Extract<keyof T, string>]);
               await this.metadataManager.recordSyncedState(key, {
                 syncStatus: SyncStatus.Synced,
@@ -559,6 +665,10 @@ export default class SyncEngine<T extends BaseStorageMapping> implements ISyncEn
 
       const result = await this.hydrationPromise;
 
+      if (this._isHydrationStale(hydrationGen)) {
+        return this._emptyRestoreResult;
+      }
+
       this.config.eventCallbacks?.onHydrationComplete?.(result);
 
       // After hydration completes, trigger a sync if there are pending operations
@@ -573,7 +683,11 @@ export default class SyncEngine<T extends BaseStorageMapping> implements ISyncEn
       this.config.eventCallbacks?.onHydrationComplete?.(this._emptyRestoreResult);
       throw error;
     } finally {
-      this.hydrationPromise = null;
+      // Only clear our own dedupe handle. A stale pass resolving late must not null out
+      // the fresh session's in-flight promise (stop() already released the stale handle).
+      if (!this._isHydrationStale(hydrationGen)) {
+        this.hydrationPromise = null;
+      }
     }
   }
 
@@ -597,6 +711,8 @@ export default class SyncEngine<T extends BaseStorageMapping> implements ISyncEn
       return this._emptyRestoreResult;
     }
 
+    const hydrationGen = this.hydrationGeneration;
+
     // If hydration is already in progress, return the existing promise
     if (this.hydrationPromise) {
       Log.info("Ganon: hydration already in progress, returning existing promise");
@@ -605,13 +721,25 @@ export default class SyncEngine<T extends BaseStorageMapping> implements ISyncEn
 
     try {
       this.hydrationPromise = this._processKeys(async (key) => {
+        if (this._isHydrationStale(hydrationGen) || !this.userManager.isUserLoggedIn()) {
+          return false;
+        }
         // Force cache invalidation to ensure fresh remote metadata
         await this.metadataManager.invalidateCacheForHydration(key);
+        if (this._isHydrationStale(hydrationGen) || !this.userManager.isUserLoggedIn()) {
+          return false;
+        }
 
         const remoteValue = await this.firestore.fetch(key);
+        if (this._isHydrationStale(hydrationGen) || !this.userManager.isUserLoggedIn()) {
+          return false;
+        }
         if (remoteValue !== undefined) {
           const remoteComputedDigest = computeHash(remoteValue);
           let remoteMetadata = await this.metadataManager.getRemoteMetadataOnly(key);
+          if (this._isHydrationStale(hydrationGen) || !this.userManager.isUserLoggedIn()) {
+            return false;
+          }
 
           // If no remote metadata is available, skip hydration but return success
           if (!remoteMetadata) {
@@ -640,6 +768,9 @@ export default class SyncEngine<T extends BaseStorageMapping> implements ISyncEn
             }, this._conflictResolutionConfig.strategy, this._conflictResolutionConfig.mergeStrategy);
 
             if (resolution.success) {
+              if (this._isHydrationStale(hydrationGen) || !this.userManager.isUserLoggedIn()) {
+                return false;
+              }
               this.storage.set(key, resolution.resolvedValue!);
             } else {
               Log.warn(`Ganon: Conflict resolution failed for key ${key}, skipping`);
@@ -653,7 +784,13 @@ export default class SyncEngine<T extends BaseStorageMapping> implements ISyncEn
             const config = { ...this._integrityFailureConfig, ...this._currentIntegrityConfig };
 
             for (let attempt = 1; attempt <= config.maxRetries; attempt++) {
+              if (this._isHydrationStale(hydrationGen) || !this.userManager.isUserLoggedIn()) {
+                return false;
+              }
               const refreshedMetadata = await this.metadataManager.getRemoteMetadataOnly(key);
+              if (this._isHydrationStale(hydrationGen) || !this.userManager.isUserLoggedIn()) {
+                return false;
+              }
               if (refreshedMetadata && refreshedMetadata.digest === remoteComputedDigest) {
                 Log.info(`Ganon: Metadata sync successful on attempt ${attempt} for key ${key}`);
                 remoteMetadata = refreshedMetadata; // Update remoteMetadata with the refreshed version
@@ -661,14 +798,28 @@ export default class SyncEngine<T extends BaseStorageMapping> implements ISyncEn
               }
 
               if (attempt === config.maxRetries) {
+                if (this._isHydrationStale(hydrationGen) || !this.userManager.isUserLoggedIn()) {
+                  return false;
+                }
                 // Use the new integrity failure handling
                 const result = await this._handleIntegrityFailure(
                   key,
                   remoteComputedDigest,
                   remoteMetadata?.digest || 'unknown',
                   attempt,
-                  this._currentIntegrityConfig
+                  this._currentIntegrityConfig,
+                  hydrationGen
                 );
+
+                // Session may have torn down while recovery awaited; generation is authoritative.
+                if (this._isHydrationStale(hydrationGen) || !this.userManager.isUserLoggedIn()) {
+                  return false;
+                }
+
+                // Helper may return stale_session (includes logged-out where gen still matches); skip error log.
+                if (result.recoveryStrategy === STALE_HYDRATION_RECOVERY_STRATEGY) {
+                  return false;
+                }
 
                 if (result.success) {
                   Log.info(`Ganon: Integrity failure recovery successful for key ${key} using strategy: ${result.recoveryStrategy}`);
@@ -686,6 +837,9 @@ export default class SyncEngine<T extends BaseStorageMapping> implements ISyncEn
 
           // Only store the data if we have valid remote metadata and the integrity check passed
           if (remoteMetadata && remoteComputedDigest === remoteMetadata.digest) {
+            if (this._isHydrationStale(hydrationGen) || !this.userManager.isUserLoggedIn()) {
+              return false;
+            }
             this.storage.set(key, remoteValue as T[Extract<keyof T, string>]);
             await this.metadataManager.recordSyncedState(key, {
               syncStatus: SyncStatus.Synced,
@@ -705,6 +859,10 @@ export default class SyncEngine<T extends BaseStorageMapping> implements ISyncEn
 
       const result = await this.hydrationPromise;
 
+      if (this._isHydrationStale(hydrationGen)) {
+        return this._emptyRestoreResult;
+      }
+
       this.config.eventCallbacks?.onHydrationComplete?.(result);
 
       // After hydration completes, trigger a sync if there are pending operations
@@ -719,7 +877,11 @@ export default class SyncEngine<T extends BaseStorageMapping> implements ISyncEn
       this.config.eventCallbacks?.onHydrationComplete?.(this._emptyRestoreResult);
       throw error;
     } finally {
-      this.hydrationPromise = null;
+      // Only clear our own dedupe handle. A stale pass resolving late must not null out
+      // the fresh session's in-flight promise (stop() already released the stale handle).
+      if (!this._isHydrationStale(hydrationGen)) {
+        this.hydrationPromise = null;
+      }
     }
   }
 
@@ -792,7 +954,7 @@ export default class SyncEngine<T extends BaseStorageMapping> implements ISyncEn
    */
   destroy(): void {
     Log.verbose('Ganon: SyncEngine.destroy');
-    this.stopSyncInterval();
+    this.stop();
     this.operationRepo.clearAll();
   }
 
@@ -806,6 +968,10 @@ export default class SyncEngine<T extends BaseStorageMapping> implements ISyncEn
 
     // Clear pending operations from the operation repo
     this.operationRepo.clearAll();
+
+    // Note: the markAsPending debounce handle is intentionally owned by stop(), not here.
+    // Ganon.logout() calls both; a standalone cancelPendingOperations() leaves the debounce
+    // running because it is a start/stop lifecycle concern, not a queued-operation concern.
   }
 
   /* P R I V A T E */
@@ -956,8 +1122,13 @@ export default class SyncEngine<T extends BaseStorageMapping> implements ISyncEn
     computedHash: string,
     remoteHash: string,
     attempts: number,
-    integrityConfig?: Partial<IntegrityFailureConfig>
+    integrityConfig?: Partial<IntegrityFailureConfig>,
+    hydrationGen?: number
   ): Promise<{ success: boolean; recoveryStrategy?: string }> {
+    if (hydrationGen !== undefined && (this._isHydrationStale(hydrationGen) || !this.userManager.isUserLoggedIn())) {
+      return { success: false, recoveryStrategy: STALE_HYDRATION_RECOVERY_STRATEGY };
+    }
+
     const integrityFailure: IntegrityFailureInfo = {
       key,
       computedHash,
@@ -979,11 +1150,11 @@ export default class SyncEngine<T extends BaseStorageMapping> implements ISyncEn
     // Apply recovery strategy
     switch (config.strategy) {
       case IntegrityFailureRecoveryStrategy.FORCE_REFRESH:
-        return await this._forceMetadataRefresh(key);
+        return await this._forceMetadataRefresh(key, hydrationGen);
       case IntegrityFailureRecoveryStrategy.USE_LOCAL:
-        return await this._useLocalData(key);
+        return await this._useLocalData(key, hydrationGen);
       case IntegrityFailureRecoveryStrategy.USE_REMOTE:
-        return await this._useRemoteDataDespiteIntegrityFailure(key);
+        return await this._useRemoteDataDespiteIntegrityFailure(key, hydrationGen);
       case IntegrityFailureRecoveryStrategy.SKIP:
         Log.warn(`Skipping key ${key} due to integrity failure`);
         return { success: false, recoveryStrategy: IntegrityFailureRecoveryStrategy.SKIP };
@@ -1120,16 +1291,31 @@ export default class SyncEngine<T extends BaseStorageMapping> implements ISyncEn
    * This is different from _useRemoteDataDespiteIntegrityFailure which actually
    * replaces local data when there are persistent integrity issues.
    */
-  private async _forceMetadataRefresh(key: Extract<keyof T, string>): Promise<{ success: boolean; recoveryStrategy: string }> {
+  private async _forceMetadataRefresh(
+    key: Extract<keyof T, string>,
+    hydrationGen?: number
+  ): Promise<{ success: boolean; recoveryStrategy: string }> {
     try {
+      if (hydrationGen !== undefined && (this._isHydrationStale(hydrationGen) || !this.userManager.isUserLoggedIn())) {
+        return { success: false, recoveryStrategy: STALE_HYDRATION_RECOVERY_STRATEGY };
+      }
+
       Log.info(`Ganon: Attempting force metadata refresh for key ${key}`);
 
       // Invalidate all caches
       await this.metadataManager.invalidateCache(key);
       await this.metadataManager.invalidateCacheForHydration(key);
 
+      if (hydrationGen !== undefined && (this._isHydrationStale(hydrationGen) || !this.userManager.isUserLoggedIn())) {
+        return { success: false, recoveryStrategy: STALE_HYDRATION_RECOVERY_STRATEGY };
+      }
+
       // Force a fresh fetch
       const remoteValue = await this.firestore.fetch(key);
+      if (hydrationGen !== undefined && (this._isHydrationStale(hydrationGen) || !this.userManager.isUserLoggedIn())) {
+        return { success: false, recoveryStrategy: STALE_HYDRATION_RECOVERY_STRATEGY };
+      }
+
       if (remoteValue !== undefined) {
         const newComputedHash = computeHash(remoteValue);
         const freshMetadata = await this.metadataManager.getRemoteMetadataOnly(key);
@@ -1154,14 +1340,25 @@ export default class SyncEngine<T extends BaseStorageMapping> implements ISyncEn
    * the local version and updating metadata to reflect the local state.
    * If no local data is available, falls back to using remote data despite integrity issues.
    */
-  private async _useLocalData(key: Extract<keyof T, string>): Promise<{ success: boolean; recoveryStrategy: string }> {
+  private async _useLocalData(
+    key: Extract<keyof T, string>,
+    hydrationGen?: number
+  ): Promise<{ success: boolean; recoveryStrategy: string }> {
     try {
+      if (hydrationGen !== undefined && (this._isHydrationStale(hydrationGen) || !this.userManager.isUserLoggedIn())) {
+        return { success: false, recoveryStrategy: STALE_HYDRATION_RECOVERY_STRATEGY };
+      }
+
       const localValue = this.storage.get(key);
 
       if (localValue !== undefined) {
         Log.info(`Ganon: Using local data for key ${key} due to integrity failure`);
 
         const localHash = computeHash(localValue);
+
+        if (hydrationGen !== undefined && (this._isHydrationStale(hydrationGen) || !this.userManager.isUserLoggedIn())) {
+          return { success: false, recoveryStrategy: STALE_HYDRATION_RECOVERY_STRATEGY };
+        }
 
         // Update metadata to reflect local state
         await this.metadataManager.recordLocalChange(key, {
@@ -1175,7 +1372,7 @@ export default class SyncEngine<T extends BaseStorageMapping> implements ISyncEn
       } else {
         // No local data available - use remote data despite integrity issue
         Log.warn(`Ganon: No local data available for key ${key}, using remote data despite integrity failure`);
-        return await this._useRemoteDataDespiteIntegrityFailure(key);
+        return await this._useRemoteDataDespiteIntegrityFailure(key, hydrationGen);
       }
     } catch (error) {
       Log.error(`Ganon: Error using local data for key ${key}: ${error}`);
@@ -1199,11 +1396,22 @@ export default class SyncEngine<T extends BaseStorageMapping> implements ISyncEn
    * - Stores remote data locally (replacing any local data)
    * - Updates metadata to reflect remote state
    */
-  private async _useRemoteDataDespiteIntegrityFailure(key: Extract<keyof T, string>): Promise<{ success: boolean; recoveryStrategy: string }> {
+  private async _useRemoteDataDespiteIntegrityFailure(
+    key: Extract<keyof T, string>,
+    hydrationGen?: number
+  ): Promise<{ success: boolean; recoveryStrategy: string }> {
     try {
+      if (hydrationGen !== undefined && (this._isHydrationStale(hydrationGen) || !this.userManager.isUserLoggedIn())) {
+        return { success: false, recoveryStrategy: STALE_HYDRATION_RECOVERY_STRATEGY };
+      }
+
       Log.info(`Ganon: Using remote data despite integrity failure for key ${key}`);
 
       const remoteValue = await this.firestore.fetch(key);
+      if (hydrationGen !== undefined && (this._isHydrationStale(hydrationGen) || !this.userManager.isUserLoggedIn())) {
+        return { success: false, recoveryStrategy: STALE_HYDRATION_RECOVERY_STRATEGY };
+      }
+
       if (remoteValue !== undefined) {
         const remoteComputedHash = computeHash(remoteValue);
 

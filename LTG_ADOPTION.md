@@ -48,6 +48,7 @@ stack; all are the first tranche after the library ships to LTG.
 | 2 | **LTG app** | `HydrationWaitReason` branching in post-login reload paths | `whenHydrated()` resolves `'hydrated' \| 'logged-out' \| 'login-failed'`. Post-login managers that `await whenHydrated()` must branch on `'logged-out'` and `'login-failed'` (e.g. return before reading user-scoped cache) — especially reload paths that run across logout/login boundaries. |
 | 3 | **LTG app** | I1 — `DataInitializationManager` | Writes default `strugglePreference` before hydrate (`:50-51`). Switch to get-or-default / gate until hydrated. |
 | 4 | **LTG app** | I1 — `NoContactManager` | Writes default no-contact state before hydrate (`:76-84`). Same pattern as `AwardManager.ts:28-42`. |
+| 5 | **Ganon** | Hydration session token (step 6.2) | Replace ~20 inline `hydrationGen` stale checks and optional `hydrationGen?` on recovery helpers with a required session token (`session.isStale()` after each await). Compiler-enforced; greppable. Same loose-optional pattern as KeyRouter-as-firestore — convention today, type error tomorrow. |
 
 Items 3–4 are duplicated in **Immediate tickets** below for detail; this table is the
 post-merge rollup.
@@ -121,6 +122,29 @@ analytics, and wiring the read-mode knob to remote flags.
 
 Leave `digestReadMode: 'dual'` (library default for sub-step 1).
 
+**Known flush races (library step 6.1, documented — not fixed in this series):**
+
+- **Stale re-assertion (fixed in 6.1):** spreading the cached `remote_metadata` map into flush
+  payloads regressed concurrent writers' entries. Fixed by writing pending keys only; Firestore
+  `merge: true` deep-merges nested map entries.
+- **Fetch→resolve→write on pending keys (pre-existing):** another client can update a pending
+  key between pre-flush fetch and `setDocument`; LAST_MODIFIED_WINS resolves against a snapshot
+  that may be stale. Same window as main, minus the spread hazard. Closing fully needs a
+  Firestore transaction — out of scope for step 6.1.
+- **Legacy-vs-legacy (transition window):** old clients had the spread hazard among themselves;
+  new clients are shielded by dual-read (higher-version-wins vs in-document digest). Sunset
+  decision in sub-step 3 should account for remaining legacy-only writers.
+- **Legacy map flush at logout (pre-existing):** `logout()` runs `backup()` (which writes data
+  and in-document digest atomically via `syncValueWithDigest`), then `stopSync()`/`stop()` and
+  `cancelPendingOperations()`. Two debounces, two owners: `stop()` cancels the SyncEngine
+  markAsPending debounce (~50ms; the syncAll fix closes the data-loss hole on that one);
+  `cancelPendingOperations()` cancels the MetadataFlushQueue debounce (~1s) without flushing
+  the legacy `remote_metadata` map. A legacy-only client reading that user's doc may see a stale
+  `remote_metadata` entry while the in-document digest is current. Not data loss — dual-read
+  protects new clients — but a mixed-fleet read hazard until sub-step 3 stops writing the
+  legacy map. Fix path: drain `syncToRemote()` on all coordinators before teardown, or accept
+  until legacy map sunset.
+
 ### Sub-step 2 — acceptance criteria (both signals must agree)
 
 Do **not** switch to `digestReadMode: 'v2'` until **both** pass:
@@ -143,9 +167,14 @@ is a config flip, not an app release. Enable `'v2'` only after both criteria pas
 After sub-step 2 stabilizes, coordinate with library step 6.3. Shrink integrity-recovery
 surface per proposal §4.5 (docKeys first).
 
-**Known deferral (M3):** `DeleteOperation` does not yet remove stale `digestMap` entries.
-Stale entries are mostly harmless under dual-read but will pollute step 6.2 fleet-verification
-queries (`hasAnyRemoteData`, analytics). Track cleanup with 6.2 work.
+**Known deferral (M3):** `DeleteOperation` removes the value but leaves the `digestMap` entry
+behind. **Symptom to expect in the wild: deleted keys churn `needsHydration` until `digestMap`
+is cleaned.** Every subsequent `start()`/hydration sees a remote digest for the deleted key,
+flags `needsHydration`, fetches, gets `undefined`, and skips — so `needsHydration` never clears.
+This is not data loss, but it means a perpetual per-`start()` re-check for every deleted key,
+forever, plus a misleading signal if you ever alert on hydration anomalies. Stale entries will
+also pollute step 6.2 fleet-verification queries (`hasAnyRemoteData`, analytics). Track cleanup
+with 6.2 work (delete must also clear the `digestMap` entry).
 
 ---
 

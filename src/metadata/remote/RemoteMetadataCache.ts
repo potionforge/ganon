@@ -4,7 +4,6 @@ import FirestoreAdapter from '../../firestore/FirestoreAdapter';
 import FirestoreReferenceManager from '../../firestore/ref/FirestoreReferenceManager';
 import { BaseStorageMapping } from '../../models/storage/BaseStorageMapping';
 import { REMOTE_METADATA_KEY, DIGEST_MAP_KEY } from '../../constants';
-import Log from '../../utils/Log';
 import SyncError, { SyncErrorType } from '../../errors/SyncError';
 import UserManager from '../../managers/UserManager';
 import { FirebaseFirestoreTypes } from '@react-native-firebase/firestore';

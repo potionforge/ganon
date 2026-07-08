@@ -120,10 +120,18 @@ export default class Ganon<T extends Record<string, any> & BaseStorageMapping> i
   }
 
   /**
-   * Stops the automatic synchronization process with the cloud.
+   * Tears down the sync engine: stops the interval, invalidates any in-flight
+   * hydration pass, and discards pending debounced markAsPending state.
+   *
+   * NOTE: teardown, not resumable pause. A key edited within the markAsPending
+   * debounce window (~50ms) whose mark has not yet flushed is dropped — local value
+   * persists but nothing records it Pending, so no later sync picks it up until that
+   * key is touched again. Run `await ganon.backup()` first if recent edits must be
+   * captured: syncAll() synchronously flushes pending marks before processOperations().
+   * Used internally by `logout()` (after `backup()`) and `destroy()`.
    */
   stopSync(): void {
-    this.syncEngine.stopSyncInterval();
+    this.syncEngine.stop();
   }
 
   /**

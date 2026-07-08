@@ -11,7 +11,10 @@
   },
   "scripts": {
     "copydiff": "bash scripts/copydiff.sh",
-    "test": "jest",
+    "typecheck": "tsc --noEmit -p tsconfig.typecheck.json",
+    "typecheck:all": "tsc --noEmit",
+    "typecheck:ratchet": "node scripts/typecheck-ratchet.mjs",
+    "test": "pnpm run typecheck && pnpm run typecheck:ratchet && jest",
     "build": "pnpm test && tsup",
     "prepare": "pnpm run build"
   },

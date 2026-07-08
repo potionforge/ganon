@@ -13,7 +13,6 @@ import FirestoreAdapter from "./FirestoreAdapter";
 import ChunkManager from "./chunking/ChunkManager";
 import UserManager from "../managers/UserManager";
 import { Scheduler } from "../ports/Scheduler";
-import KeyRouter from "../routing/KeyRouter";
 import { DIGEST_MAP_KEY } from "../constants";
 
 export default class FirestoreManager<T extends BaseStorageMapping> implements ICloudManager<T> {
@@ -43,8 +42,7 @@ export default class FirestoreManager<T extends BaseStorageMapping> implements I
     this.userManager = userManager;
     this.referenceManager = referenceManager ?? new FirestoreReferenceManager(
       userManager,
-      cloudConfig,
-      new KeyRouter(cloudConfig)
+      cloudConfig
     );
     this.dataProcessor = new DataProcessor();
     this.chunkManager = new ChunkManager(this.adapter, this.dataProcessor, scheduler);

@@ -4,7 +4,6 @@ import { CloudBackupConfig } from "../models/config/CloudBackupConfig";
 import FirestoreAdapter from "../firestore/FirestoreAdapter";
 import FirestoreReferenceManager from "../firestore/ref/FirestoreReferenceManager";
 import Log from "../utils/Log";
-import LocalMetadataManager from "./local/LocalMetadataManager";
 import MetadataStore from "./local/MetadataStore";
 import UserManager from "../managers/UserManager";
 import { Scheduler } from "../ports/Scheduler";
