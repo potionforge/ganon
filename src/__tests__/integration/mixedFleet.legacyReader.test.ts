@@ -14,6 +14,8 @@ import { resolveGanonConfig } from '../../models/config/resolveGanonConfig';
 import { REMOTE_METADATA_KEY } from '../../constants';
 import { SyncStatus } from '../../models/sync/SyncStatus';
 import { TestStorageMapping, MOCK_CLOUD_BACKUP_CONFIG } from '../../__mocks__/MockConfig';
+import { DIGEST_MAP_KEY } from '../../constants';
+import { selectRemoteDigest } from '../../metadata/digest/selectRemoteDigest';
 
 /** Simulates a legacy app install: reads remote_metadata map only. */
 function legacyOnlyReader(
@@ -74,6 +76,29 @@ describe('mixed-fleet legacy reader (step 6.1)', () => {
 
     const legacyView = legacyOnlyReader({ [REMOTE_METADATA_KEY]: legacyMap }, String(key));
     expect(legacyView).toEqual({ d: 'fleet-digest', v: 7 });
+  });
+
+  it('dual-mode new client reads legacy digest when old client wrote higher version (read half)', () => {
+    const docAfterOldClientUpdate = {
+      [DIGEST_MAP_KEY]: {
+        settings: { d: 'new-client-digest', v: 5 },
+      },
+      [REMOTE_METADATA_KEY]: {
+        settings: { d: 'old-client-digest', v: 10 },
+      },
+    };
+
+    const legacy = docAfterOldClientUpdate[REMOTE_METADATA_KEY].settings;
+    const inDocument = docAfterOldClientUpdate[DIGEST_MAP_KEY].settings;
+
+    expect(selectRemoteDigest(legacy, inDocument, 'dual')).toEqual({
+      d: 'old-client-digest',
+      v: 10,
+    });
+    expect(legacyOnlyReader(docAfterOldClientUpdate, 'settings')).toEqual({
+      d: 'old-client-digest',
+      v: 10,
+    });
   });
 
   it('does not write legacy map when legacyMetadataWrites is false (step 6.3)', async () => {
