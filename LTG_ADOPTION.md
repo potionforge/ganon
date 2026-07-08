@@ -48,6 +48,7 @@ stack; all are the first tranche after the library ships to LTG.
 | 2 | **LTG app** | `HydrationWaitReason` branching in post-login reload paths | `whenHydrated()` resolves `'hydrated' \| 'logged-out' \| 'login-failed'`. Post-login managers that `await whenHydrated()` must branch on `'logged-out'` and `'login-failed'` (e.g. return before reading user-scoped cache) — especially reload paths that run across logout/login boundaries. |
 | 3 | **LTG app** | I1 — `DataInitializationManager` | Writes default `strugglePreference` before hydrate (`:50-51`). Switch to get-or-default / gate until hydrated. |
 | 4 | **LTG app** | I1 — `NoContactManager` | Writes default no-contact state before hydrate (`:76-84`). Same pattern as `AwardManager.ts:28-42`. |
+| 5 | **Ganon** | Hydration session token (step 6.2) | Replace ~20 inline `hydrationGen` stale checks and optional `hydrationGen?` on recovery helpers with a required session token (`session.isStale()` after each await). Compiler-enforced; greppable. Same loose-optional pattern as KeyRouter-as-firestore — convention today, type error tomorrow. |
 
 Items 3–4 are duplicated in **Immediate tickets** below for detail; this table is the
 post-merge rollup.
