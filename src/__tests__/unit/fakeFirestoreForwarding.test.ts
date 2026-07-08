@@ -79,6 +79,32 @@ describe('FakeFirestore forwarding through production adapter', () => {
     expect(fake.getDocument('users/bob/ledger/entry1')).toEqual({ amount: 100, status: 'posted' });
   });
 
+  it('setDocument merge preserves sibling keys in nested digestMap', async () => {
+    const fake = new FakeFirestore();
+    const adapter = new FirestoreAdapter(createTestConfig(), fake.module);
+    const ref = doc(fake.module, 'users', 'alice', 'backup', 'settings');
+
+    await adapter.setDocument(
+      ref,
+      { key1: { foo: 1 }, digestMap: { key1: { d: 'hash1', v: 1 } } },
+      { merge: true }
+    );
+    await adapter.setDocument(
+      ref,
+      { key2: { bar: 2 }, digestMap: { key2: { d: 'hash2', v: 1 } } },
+      { merge: true }
+    );
+
+    expect(fake.getDocument(ref.path)).toEqual({
+      key1: { foo: 1 },
+      key2: { bar: 2 },
+      digestMap: {
+        key1: { d: 'hash1', v: 1 },
+        key2: { d: 'hash2', v: 1 },
+      },
+    });
+  });
+
   it('isolates two FakeFirestore instances — writes through one never appear in the other', async () => {
     const fake1 = new FakeFirestore();
     const fake2 = new FakeFirestore();
