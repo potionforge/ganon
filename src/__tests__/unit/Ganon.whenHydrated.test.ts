@@ -29,7 +29,6 @@ const mockStorageManager: any = {
 const mockSyncEngine: any = {
   start: jest.fn(),
   stop: jest.fn(),
-  startSyncInterval: jest.fn(),
   stopSyncInterval: jest.fn(),
   cancelPendingOperations: jest.fn(),
   syncAll: jest.fn().mockResolvedValue({
@@ -265,6 +264,181 @@ describe('Ganon whenHydrated lifecycle', () => {
     });
 
     await expect(ganon.login('u1')).resolves.toBe('restore');
+    await expect(ganon.whenHydrated()).resolves.toBe('hydrated');
+  });
+
+  it('stopSync() resolves pending whenHydrated() waiters with stopped', async () => {
+    const ganon = createGanon({ autoStartSync: false });
+    mockSyncEngine.hasAnyRemoteData.mockResolvedValue(true);
+    mockSyncEngine.restore.mockImplementation(() => new Promise(() => {}));
+    mockUserManager.isUserLoggedIn.mockImplementation(() => mockStorageManager.get('email') != null);
+    mockStorageManager.set.mockImplementation((key: string, value: string) => {
+      if (key === 'email') {
+        mockStorageManager.get.mockImplementation((k: string) => (k === 'email' ? value : undefined));
+      }
+    });
+
+    void ganon.login('u1');
+    await Promise.resolve();
+
+    let settled = false;
+    const waiter = ganon.whenHydrated().then(r => {
+      settled = true;
+      return r;
+    });
+    await Promise.resolve();
+    expect(settled).toBe(false);
+
+    ganon.stopSync();
+    await expect(waiter).resolves.toBe('stopped');
+  });
+
+  it('destroy() resolves pending whenHydrated() waiters with stopped', async () => {
+    const ganon = createGanon({ autoStartSync: false });
+    mockSyncEngine.hasAnyRemoteData.mockResolvedValue(true);
+    mockSyncEngine.restore.mockImplementation(() => new Promise(() => {}));
+    mockUserManager.isUserLoggedIn.mockImplementation(() => mockStorageManager.get('email') != null);
+    mockStorageManager.set.mockImplementation((key: string, value: string) => {
+      if (key === 'email') {
+        mockStorageManager.get.mockImplementation((k: string) => (k === 'email' ? value : undefined));
+      }
+    });
+
+    void ganon.login('u1');
+    await Promise.resolve();
+
+    const waiter = ganon.whenHydrated();
+    ganon.destroy();
+
+    await expect(waiter).resolves.toBe('stopped');
+  });
+
+  it('logout settles logged-out once without stopSync double-settlement', async () => {
+    const ganon = createGanon({ autoStartSync: false });
+    mockSyncEngine.hasAnyRemoteData.mockResolvedValue(true);
+    mockSyncEngine.restore.mockImplementation(() => new Promise(() => {}));
+    mockUserManager.isUserLoggedIn.mockImplementation(() => mockStorageManager.get('email') != null);
+    mockStorageManager.set.mockImplementation((key: string, value: string) => {
+      if (key === 'email') {
+        mockStorageManager.get.mockImplementation((k: string) => (k === 'email' ? value : undefined));
+      }
+    });
+
+    void ganon.login('u1');
+    await Promise.resolve();
+
+    const reasons: string[] = [];
+    void ganon.whenHydrated().then(r => reasons.push(r));
+
+    mockUserManager.isUserLoggedIn.mockReturnValue(false);
+    await ganon.logout({ backup: false });
+
+    expect(reasons).toEqual(['logged-out']);
+  });
+
+  it('same login after stopSync: late whenHydrated stays stopped until startSync completes hydration', async () => {
+    const ganon = createGanon({ autoStartSync: false });
+    mockSyncEngine.hasAnyRemoteData.mockResolvedValue(true);
+    mockSyncEngine.restore.mockImplementation(() => new Promise(() => {}));
+    mockUserManager.isUserLoggedIn.mockImplementation(() => mockStorageManager.get('email') != null);
+    mockStorageManager.set.mockImplementation((key: string, value: string) => {
+      if (key === 'email') {
+        mockStorageManager.get.mockImplementation((k: string) => (k === 'email' ? value : undefined));
+      }
+    });
+
+    void ganon.login('u1');
+    await Promise.resolve();
+
+    ganon.stopSync();
+    await expect(ganon.whenHydrated()).resolves.toBe('stopped');
+
+    mockSyncEngine.start.mockImplementation(() => {
+      capturedInternalConfig?.eventCallbacks?.onHydrationComplete?.({
+        success: true,
+        restoredKeys: [],
+        failedKeys: [],
+        integrityFailures: [],
+      });
+    });
+
+    ganon.startSync();
+    await expect(ganon.whenHydrated()).resolves.toBe('hydrated');
+  });
+
+  it('logout after stopSync resets stopped reason so re-login reaches hydrated', async () => {
+    const ganon = createGanon({ autoStartSync: false });
+    mockSyncEngine.hasAnyRemoteData.mockResolvedValue(true);
+    mockSyncEngine.restore.mockImplementation(() => new Promise(() => {}));
+    mockUserManager.isUserLoggedIn.mockImplementation(() => mockStorageManager.get('email') != null);
+    mockStorageManager.set.mockImplementation((key: string, value: string) => {
+      if (key === 'email') {
+        mockStorageManager.get.mockImplementation((k: string) => (k === 'email' ? value : undefined));
+      }
+    });
+
+    void ganon.login('u1');
+    await Promise.resolve();
+    ganon.stopSync();
+    await expect(ganon.whenHydrated()).resolves.toBe('stopped');
+
+    mockUserManager.isUserLoggedIn.mockReturnValue(false);
+    await ganon.logout({ backup: false });
+
+    mockUserManager.isUserLoggedIn.mockImplementation(() => mockStorageManager.get('email') != null);
+    mockSyncEngine.restore.mockResolvedValue({
+      success: true,
+      restoredKeys: ['settings'],
+      failedKeys: [],
+      integrityFailures: [],
+    });
+
+    await ganon.login('u2');
+    await expect(ganon.whenHydrated()).resolves.toBe('hydrated');
+  });
+
+  it('after stopSync then start() hydration completes a new waiter resolves hydrated', async () => {
+    const ganon = createGanon({ autoStartSync: true });
+    mockSyncEngine.hasAnyRemoteData.mockResolvedValue(true);
+    mockUserManager.isUserLoggedIn.mockImplementation(() => mockStorageManager.get('email') != null);
+    mockStorageManager.set.mockImplementation((key: string, value: string) => {
+      if (key === 'email') {
+        mockStorageManager.get.mockImplementation((k: string) => (k === 'email' ? value : undefined));
+      }
+    });
+    mockSyncEngine.restore.mockResolvedValue({
+      success: true,
+      restoredKeys: ['settings'],
+      failedKeys: [],
+      integrityFailures: [],
+    });
+
+    let startCount = 0;
+    mockSyncEngine.start.mockImplementation(() => {
+      startCount += 1;
+      if (startCount === 1) {
+        return;
+      }
+      capturedInternalConfig?.eventCallbacks?.onHydrationComplete?.({
+        success: true,
+        restoredKeys: [],
+        failedKeys: [],
+        integrityFailures: [],
+      });
+    });
+
+    void ganon.login('u1');
+    await Promise.resolve();
+
+    const stoppedWaiter = ganon.whenHydrated();
+    ganon.stopSync();
+    await expect(stoppedWaiter).resolves.toBe('stopped');
+
+    mockUserManager.getCurrentUser.mockReturnValue(undefined);
+    mockStorageManager.get.mockReturnValue(undefined);
+    mockUserManager.isUserLoggedIn.mockImplementation(() => mockStorageManager.get('email') != null);
+
+    await ganon.login('u2');
     await expect(ganon.whenHydrated()).resolves.toBe('hydrated');
   });
 });

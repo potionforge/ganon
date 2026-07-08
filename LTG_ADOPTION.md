@@ -45,13 +45,45 @@ stack; all are the first tranche after the library ships to LTG.
 | # | Repo | Item | Notes |
 |---|---|---|---|
 | 1 | **Ganon** | Un-skip conflict-resolution failure test | `SyncController.test.ts` → `it.skip('should handle conflict resolution failure gracefully')`. Original excuse (static-method mocking) is obsolete: `SyncEngine` now accepts injected `Clock` / `Scheduler` / fakes — rewrite against `FakeFirestore` + port injection, no static mocking. Proof the testability investment pays off. |
-| 2 | **LTG app** | `HydrationWaitReason` branching in post-login reload paths | `whenHydrated()` resolves `'hydrated' \| 'logged-out' \| 'login-failed'`. Post-login managers that `await whenHydrated()` must branch on `'logged-out'` and `'login-failed'` (e.g. return before reading user-scoped cache) — especially reload paths that run across logout/login boundaries. |
+| 2 | **LTG app** | `HydrationWaitReason` branching in post-login reload paths | `whenHydrated()` resolves `'hydrated' \| 'logged-out' \| 'login-failed' \| 'stopped'`. Post-login managers that `await whenHydrated()` must treat anything `!== 'hydrated'` as do-not-read-user-scoped-cache (including `'stopped'` after `stopSync()`/`destroy()`). |
 | 3 | **LTG app** | I1 — `DataInitializationManager` | Writes default `strugglePreference` before hydrate (`:50-51`). Switch to get-or-default / gate until hydrated. |
 | 4 | **LTG app** | I1 — `NoContactManager` | Writes default no-contact state before hydrate (`:76-84`). Same pattern as `AwardManager.ts:28-42`. |
-| 5 | **Ganon** | Hydration session token (step 6.2) | Replace ~20 inline `hydrationGen` stale checks and optional `hydrationGen?` on recovery helpers with a required session token (`session.isStale()` after each await). Compiler-enforced; greppable. Same loose-optional pattern as KeyRouter-as-firestore — convention today, type error tomorrow. |
+| 5 | **Ganon** | Hydration session token (step 6.2) | **Done** — `HydrationSession` with required `session.isStale()` on hydrate/forceHydrate/restore recovery paths. See remote→local write-surface table in commit message. |
+| 6 | **LTG app** | `startSync()` semantic change — grep before adopting | `startSync()` now calls `syncEngine.start()` (interval **+ hydrate re-fire when logged in**), not `startSyncInterval()` alone. Grep the LTG app for `startSync(` callers; any using it as "just turn the interval on" (app boot, network-recovery handlers) now also trigger a hydration pass. Confirm each caller tolerates that before bumping the Ganon version. |
+| 7 | **Ganon** | `MetadataCoordinator.ensureConsistency` — delete or session-guard | Dead code today (public `MetadataManager` API, zero production callers) with a remote-derived `recordSyncedState` behind it. Before step 6.2 closes: either delete it, or thread `HydrationSession` through if a caller is added. Dead code that writes remote-derived data is a trap, not an asset. |
 
 Items 3–4 are duplicated in **Immediate tickets** below for detail; this table is the
 post-merge rollup.
+
+### beta-7 → main merge gate (rollout)
+
+When `beta-7` merges to `main`, the branches have diverged across the `SyncController` →
+`SyncEngine` class rename. A duplicated-hunk merge artifact (both `syncController` and
+`syncEngine` lines surviving in the same method) is plausible even though no single commit
+on either branch contains both — Bugbot diffs show base-side and head-side context together.
+
+**Mandatory on the merge commit:** full gate (`pnpm test`) plus `grep -r syncController src/`
+must return zero hits. Any survivor is a merge-resolution defect, not a rename incomplete.
+
+### Remote→local write surface (session pass)
+
+Enumeration includes `storage.set`, `recordSyncedState`, `recordLocalChange`,
+`MetadataStore._persist` (via `storage.set(METADATA_KEY)`), and in-memory remote caches
+consumed by restore (`lastRemoteSnapshot`, `RemoteMetadataCache`).
+
+| Path | Classification | Notes |
+|---|---|---|
+| `SyncEngine.restore` / `hydrate` / `forceHydrate` | **guarded** | `HydrationSession.isStale()` before writes |
+| Integrity recovery helpers | **guarded** | Required session parameter |
+| `MetadataManager.hydrateMetadata` | **cache-only, session-guarded** | Sole caller: `SyncEngine.restore()`. Required session. Fetches into `RemoteMetadataCache` + `lastRemoteSnapshot` only (no `MetadataStore._persist`). Stale pass is pure no-op (bare `return`). |
+| `RemoteMetadataCache` | **epoch-guarded write-back** | `invalidate()` bumps epoch; `_doFetch` discards write-back if epoch changed mid-flight (teardown-safe against orphaned refreshes). |
+| `MetadataCoordinator.ensureConsistency` | **dead code — delete or session-guard before use** | Public API on `MetadataManager`, zero production callers. Would read remote and may `recordSyncedState` — remote-derived trap if left unwired. |
+| `SyncEngine.stop()` | **teardown (cache only)** | Calls `metadataManager.invalidateAllRemoteCaches()` — coordinator `remoteCache.invalidate()` per doc, no flush cancel. Stale passes never invalidate. |
+| `logout()` / `cancelPendingOperations()` | **teardown (flush + cache + ops)** | `Ganon.logout()` → `stopSync()` then `syncEngine.cancelPendingOperations()` → per-coordinator `flushQueue.cancelAll()` + cache invalidate + `operationRepo.clearAll()`. Idempotent double cache invalidate on logout path. |
+| `SetOperation.execute` | **local-only** | Reads local value, pushes to remote |
+| `DeleteOperation.execute` | **local-only** | Remote delete then local remove |
+| `_handleDataConflict` | **unreachable** | Not wired into sync flow |
+| `_updateLastBackup`, `syncAll` marks | **local-only** | Local timestamp / hash comparison |
 
 ---
 
@@ -136,14 +168,10 @@ Leave `digestReadMode: 'dual'` (library default for sub-step 1).
   decision in sub-step 3 should account for remaining legacy-only writers.
 - **Legacy map flush at logout (pre-existing):** `logout()` runs `backup()` (which writes data
   and in-document digest atomically via `syncValueWithDigest`), then `stopSync()`/`stop()` and
-  `cancelPendingOperations()`. Two debounces, two owners: `stop()` cancels the SyncEngine
-  markAsPending debounce (~50ms; the syncAll fix closes the data-loss hole on that one);
-  `cancelPendingOperations()` cancels the MetadataFlushQueue debounce (~1s) without flushing
-  the legacy `remote_metadata` map. A legacy-only client reading that user's doc may see a stale
-  `remote_metadata` entry while the in-document digest is current. Not data loss — dual-read
-  protects new clients — but a mixed-fleet read hazard until sub-step 3 stops writing the
-  legacy map. Fix path: drain `syncToRemote()` on all coordinators before teardown, or accept
-  until legacy map sunset.
+  `cancelPendingOperations()`. Three teardown owners:
+  - `stop()` / `stopSync()`: SyncEngine markAsPending debounce (~50ms) + `invalidateAllRemoteCaches()` (epoch bump per coordinator; no flush cancel)
+  - `syncEngine.cancelPendingOperations()` (logout only): MetadataFlushQueue debounce (~1s) cancel + cache invalidate again + operation repo clear — idempotent with stop's cache invalidate
+  A bare `stopSync()` without logout does **not** cancel the ~1s legacy-map flush debounce.
 
 ### Sub-step 2 — acceptance criteria (both signals must agree)
 
