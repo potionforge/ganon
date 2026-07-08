@@ -1,3 +1,6 @@
+import { deepMerge } from '../../src/__tests__/utils/deepMerge';
+import { getFakeFromModule, getRefOwner } from '../../src/__tests__/utils/FakeFirestore';
+
 // Define the types
 export type DocumentReference = {
   path: string;
@@ -62,25 +65,6 @@ class MockStore {
   }
 }
 
-function deepMerge(target: Record<string, any>, source: Record<string, any>): Record<string, any> {
-  const result = { ...target };
-  for (const [key, value] of Object.entries(source)) {
-    if (
-      value !== null &&
-      typeof value === 'object' &&
-      !Array.isArray(value) &&
-      result[key] !== null &&
-      typeof result[key] === 'object' &&
-      !Array.isArray(result[key])
-    ) {
-      result[key] = deepMerge(result[key], value);
-    } else {
-      result[key] = value;
-    }
-  }
-  return result;
-}
-
 const mockStore = new MockStore();
 
 function isReference(obj: any): obj is { path: string } {
@@ -89,6 +73,14 @@ function isReference(obj: any): obj is { path: string } {
 
 const mockFirestore = {
   collection: (pathOrFirestore: any, ...pathSegments: string[]) => {
+    const fake = getFakeFromModule(pathOrFirestore);
+    if (fake) {
+      return fake.collection(pathOrFirestore, ...pathSegments);
+    }
+    const owner = getRefOwner(pathOrFirestore);
+    if (owner) {
+      return owner.collection(pathOrFirestore, ...pathSegments);
+    }
     const segments =
       typeof pathOrFirestore === 'string' || isReference(pathOrFirestore)
         ? [isReference(pathOrFirestore) ? pathOrFirestore.path : pathOrFirestore, ...pathSegments]
@@ -103,6 +95,14 @@ const mockFirestore = {
     return new MockCollectionReference(fullPath, parentDoc);
   },
   doc: (pathOrFirestore: any, ...pathSegments: string[]) => {
+    const fake = getFakeFromModule(pathOrFirestore);
+    if (fake) {
+      return fake.doc(pathOrFirestore, ...pathSegments);
+    }
+    const owner = getRefOwner(pathOrFirestore);
+    if (owner) {
+      return owner.doc(pathOrFirestore, ...pathSegments);
+    }
     const segments =
       typeof pathOrFirestore === 'string' || isReference(pathOrFirestore)
         ? [isReference(pathOrFirestore) ? pathOrFirestore.path : pathOrFirestore, ...pathSegments]
@@ -111,6 +111,10 @@ const mockFirestore = {
     return new MockDocumentReference(fullPath);
   },
   getDoc: async (ref: DocumentReference) => {
+    const owner = getRefOwner(ref);
+    if (owner) {
+      return owner.getDoc(ref);
+    }
     const data = mockStore.get(ref.path);
     return {
       exists: !!data,
@@ -119,6 +123,10 @@ const mockFirestore = {
     };
   },
   getDocs: async (ref: CollectionReference) => {
+    const owner = getRefOwner(ref);
+    if (owner) {
+      return owner.getDocs(ref);
+    }
     const docs = mockStore.getDocsInCollection(ref.path);
     return {
       empty: docs.length === 0,
@@ -126,6 +134,10 @@ const mockFirestore = {
     };
   },
   setDoc: async (ref: DocumentReference, data: any, options?: { merge?: boolean }) => {
+    const owner = getRefOwner(ref);
+    if (owner) {
+      return owner.setDoc(ref, data, options);
+    }
     if (options?.merge) {
       const existing = mockStore.get(ref.path) || {};
       mockStore.set(ref.path, deepMerge(existing, data));
@@ -133,22 +145,53 @@ const mockFirestore = {
       mockStore.set(ref.path, data);
     }
   },
+  updateDoc: async (ref: DocumentReference, data: any) => {
+    const owner = getRefOwner(ref);
+    if (owner) {
+      return owner.updateDoc(ref, data);
+    }
+    const existing = mockStore.get(ref.path) || {};
+    mockStore.set(ref.path, deepMerge(existing, data));
+  },
   deleteDoc: async (ref: DocumentReference) => {
+    const owner = getRefOwner(ref);
+    if (owner) {
+      return owner.deleteDoc(ref);
+    }
     mockStore.delete(ref.path);
   },
-  writeBatch: () => {
+  writeBatch: (firestore?: unknown) => {
+    const fake = getFakeFromModule(firestore);
+    if (fake) {
+      return fake.writeBatch();
+    }
+    const pending: Array<() => void | Promise<void>> = [];
     const batch = {
-      delete: (ref: DocumentReference) => {
-        mockStore.delete(ref.path);
+      set: (ref: DocumentReference, data: any, options?: { merge?: boolean }) => {
+        pending.push(() => mockFirestore.setDoc(ref, data, options));
+        return batch;
       },
-      commit: async () => {},
+      update: (ref: DocumentReference, data: any) => {
+        pending.push(() => mockFirestore.updateDoc(ref, data));
+        return batch;
+      },
+      delete: (ref: DocumentReference) => {
+        pending.push(() => mockStore.delete(ref.path));
+        return batch;
+      },
+      commit: async () => {
+        for (const op of pending) {
+          await op();
+        }
+      },
     };
     return batch;
   },
   query: () => ({}),
+  // Unsupported: Ganon does not use deleteField() with merge writes. Real sentinel would delete the key.
   deleteField: () => ({}),
   runTransaction: async <T>(
-    _firestore: unknown,
+    firestore: unknown,
     updateFunction: (transaction: {
       get: (ref: DocumentReference) => Promise<{ exists: boolean; data: () => any }>;
       set: (ref: DocumentReference, data: any, options?: { merge?: boolean }) => Promise<void>;
@@ -156,22 +199,35 @@ const mockFirestore = {
       delete: (ref: DocumentReference) => Promise<void>;
     }) => Promise<T>
   ): Promise<T> => {
-    const pendingSets: Array<{ ref: DocumentReference; data: any; options?: { merge?: boolean } }> = [];
+    const fake = getFakeFromModule(firestore);
+    if (fake) {
+      return fake.runTransaction(updateFunction);
+    }
+    const pending: Array<() => void | Promise<void>> = [];
+    let hasWrites = false;
     const transaction = {
-      get: async (ref: DocumentReference) => mockFirestore.getDoc(ref),
+      get: async (ref: DocumentReference) => {
+        if (hasWrites) {
+          throw new Error('Firestore transactions disallow reading after writing');
+        }
+        return mockFirestore.getDoc(ref);
+      },
       set: async (ref: DocumentReference, data: any, options?: { merge?: boolean }) => {
-        pendingSets.push({ ref, data, options });
+        hasWrites = true;
+        pending.push(() => mockFirestore.setDoc(ref, data, options));
       },
       update: async (ref: DocumentReference, data: any) => {
-        pendingSets.push({ ref, data, options: { merge: true } });
+        hasWrites = true;
+        pending.push(() => mockFirestore.setDoc(ref, data, { merge: true }));
       },
       delete: async (ref: DocumentReference) => {
-        mockStore.delete(ref.path);
+        hasWrites = true;
+        pending.push(() => mockStore.delete(ref.path));
       },
     };
     const result = await updateFunction(transaction);
-    for (const { ref, data, options } of pendingSets) {
-      await mockFirestore.setDoc(ref, data, options);
+    for (const op of pending) {
+      await op();
     }
     return result;
   },
@@ -183,6 +239,7 @@ export const doc = mockFirestore.doc;
 export const getDoc = mockFirestore.getDoc;
 export const getDocs = mockFirestore.getDocs;
 export const setDoc = mockFirestore.setDoc;
+export const updateDoc = mockFirestore.updateDoc;
 export const deleteDoc = mockFirestore.deleteDoc;
 export const writeBatch = mockFirestore.writeBatch;
 export const query = mockFirestore.query;
@@ -200,4 +257,4 @@ export type FirebaseFirestoreTypes = {
 export const getMockStore = () => mockStore;
 export const clearMockStore = () => mockStore.clear();
 
-export default mockFirestore; 
+export default mockFirestore;

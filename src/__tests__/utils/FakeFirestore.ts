@@ -1,23 +1,45 @@
+// Type-only imports from @react-native-firebase/firestore only; runtime imports create a cycle with the manual mock.
 import { FirebaseFirestoreTypes } from '@react-native-firebase/firestore';
+import { deepMerge } from './deepMerge';
 
 type DocData = Record<string, unknown>;
 
-class FakeDocRef implements FirebaseFirestoreTypes.DocumentReference {
-  constructor(public path: string) {}
+export function getFakeFromModule(module: unknown): FakeFirestore | undefined {
+  if (typeof module === 'object' && module !== null && '__fakeFirestore' in module) {
+    return (module as { __fakeFirestore: FakeFirestore }).__fakeFirestore;
+  }
+  return undefined;
+}
+
+export function getRefOwner(ref: unknown): FakeFirestore | undefined {
+  if (typeof ref === 'object' && ref !== null && '__owner' in ref) {
+    return (ref as { __owner: FakeFirestore }).__owner;
+  }
+  return undefined;
+}
+
+export class FakeDocRef implements FirebaseFirestoreTypes.DocumentReference {
+  constructor(
+    public path: string,
+    readonly __owner: FakeFirestore
+  ) {}
   get id(): string {
     return this.path.split('/').pop() || '';
   }
   get parent(): FirebaseFirestoreTypes.CollectionReference {
     const parts = this.path.split('/');
     parts.pop();
-    return new FakeColRef(parts.join('/'));
+    return new FakeColRef(parts.join('/'), this.__owner);
   }
-  collection = (id: string) => new FakeColRef(`${this.path}/${id}`);
+  collection = (id: string) => new FakeColRef(`${this.path}/${id}`, this.__owner);
   isEqual = (other: FirebaseFirestoreTypes.DocumentReference) => other.path === this.path;
 }
 
-class FakeColRef implements FirebaseFirestoreTypes.CollectionReference {
-  constructor(public path: string) {}
+export class FakeColRef implements FirebaseFirestoreTypes.CollectionReference {
+  constructor(
+    public path: string,
+    readonly __owner: FakeFirestore
+  ) {}
   get id(): string {
     return this.path.split('/').pop() || '';
   }
@@ -25,42 +47,32 @@ class FakeColRef implements FirebaseFirestoreTypes.CollectionReference {
     if (!this.path.includes('/')) return null;
     const parts = this.path.split('/');
     parts.pop();
-    return new FakeDocRef(parts.join('/'));
+    return new FakeDocRef(parts.join('/'), this.__owner);
   }
-  doc = (id: string) => new FakeDocRef(`${this.path}/${id}`);
+  doc = (id: string) => new FakeDocRef(`${this.path}/${id}`, this.__owner);
   isEqual = (other: FirebaseFirestoreTypes.CollectionReference) => other.path === this.path;
-}
-
-function deepMerge(target: DocData, source: DocData): DocData {
-  const result = { ...target };
-  for (const [key, value] of Object.entries(source)) {
-    if (
-      value !== null &&
-      typeof value === 'object' &&
-      !Array.isArray(value) &&
-      result[key] !== null &&
-      typeof result[key] === 'object' &&
-      !Array.isArray(result[key])
-    ) {
-      result[key] = deepMerge(result[key] as DocData, value as DocData);
-    } else {
-      result[key] = value;
-    }
-  }
-  return result;
 }
 
 /**
  * In-memory Firestore test double with merge semantics, transactions, and batches.
- * Tracks document reads for N-fetch regression tests.
+ * Tracks query reads (getDoc/getDocs calls, not per-document) for N-fetch regression tests.
  */
 export class FakeFirestore {
   private documents = new Map<string, DocData>();
   readonly module = { __fakeFirestore: this } as FirebaseFirestoreTypes.Module;
   private readCount = 0;
 
-  doc(_firestore: FirebaseFirestoreTypes.Module, ...pathSegments: string[]): FakeDocRef {
-    return new FakeDocRef(pathSegments.join('/'));
+  doc(
+    parent: FirebaseFirestoreTypes.DocumentReference | FirebaseFirestoreTypes.CollectionReference | FirebaseFirestoreTypes.Module | string,
+    ...pathSegments: string[]
+  ): FakeDocRef {
+    const segments =
+      typeof parent === 'string'
+        ? [parent, ...pathSegments]
+        : 'path' in parent
+          ? [parent.path, ...pathSegments]
+          : pathSegments;
+    return new FakeDocRef(segments.filter(Boolean).join('/'), this);
   }
 
   collection(
@@ -73,7 +85,7 @@ export class FakeFirestore {
         : 'path' in parent
           ? parent.path
           : '';
-    return new FakeColRef([base, ...pathSegments].filter(Boolean).join('/'));
+    return new FakeColRef([base, ...pathSegments].filter(Boolean).join('/'), this);
   }
 
   async getDoc(ref: FirebaseFirestoreTypes.DocumentReference): Promise<FirebaseFirestoreTypes.DocumentSnapshot> {
@@ -96,7 +108,7 @@ export class FakeFirestore {
     const docs: FirebaseFirestoreTypes.DocumentSnapshot[] = [];
     for (const [path, data] of this.documents.entries()) {
       if (path.startsWith(prefix) && path.slice(prefix.length).indexOf('/') === -1) {
-        const docRef = new FakeDocRef(path);
+        const docRef = new FakeDocRef(path, this);
         docs.push({
           exists: true,
           data: () => data,
@@ -143,9 +155,16 @@ export class FakeFirestore {
     updateFunction: (transaction: FirebaseFirestoreTypes.Transaction) => Promise<T>
   ): Promise<T> {
     const pending: Array<() => void> = [];
+    let hasWrites = false;
     const tx = {
-      get: (ref: FirebaseFirestoreTypes.DocumentReference) => this.getDoc(ref),
+      get: (ref: FirebaseFirestoreTypes.DocumentReference) => {
+        if (hasWrites) {
+          throw new Error('Firestore transactions disallow reading after writing');
+        }
+        return this.getDoc(ref);
+      },
       set: (ref: FirebaseFirestoreTypes.DocumentReference, data: DocData, options?: FirebaseFirestoreTypes.SetOptions) => {
+        hasWrites = true;
         pending.push(() => {
           if (options?.merge) {
             const existing = this.documents.get(ref.path) || {};
@@ -156,12 +175,14 @@ export class FakeFirestore {
         });
       },
       update: (ref: FirebaseFirestoreTypes.DocumentReference, data: DocData) => {
+        hasWrites = true;
         pending.push(() => {
           const existing = this.documents.get(ref.path) || {};
           this.documents.set(ref.path, deepMerge(existing, data));
         });
       },
       delete: (ref: FirebaseFirestoreTypes.DocumentReference) => {
+        hasWrites = true;
         pending.push(() => this.documents.delete(ref.path));
       },
     } as FirebaseFirestoreTypes.Transaction;

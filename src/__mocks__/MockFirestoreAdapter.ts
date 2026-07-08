@@ -3,25 +3,7 @@ import {
 } from '@react-native-firebase/firestore';
 
 import IFirestoreAdapter from '../models/interfaces/IFirestoreAdapter';
-
-function deepMerge(target: Record<string, any>, source: Record<string, any>): Record<string, any> {
-  const result = { ...target };
-  for (const [key, value] of Object.entries(source)) {
-    if (
-      value !== null &&
-      typeof value === 'object' &&
-      !Array.isArray(value) &&
-      result[key] !== null &&
-      typeof result[key] === 'object' &&
-      !Array.isArray(result[key])
-    ) {
-      result[key] = deepMerge(result[key], value);
-    } else {
-      result[key] = value;
-    }
-  }
-  return result;
-}
+import { deepMerge } from '../__tests__/utils/deepMerge';
 
 /**
  * A mock implementation of FirestoreAdapter for testing purposes.
