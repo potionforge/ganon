@@ -1,5 +1,5 @@
 import { jest } from '@jest/globals';
-import SyncController from '../../sync/SyncController';
+import SyncEngine from '../../sync/SyncEngine';
 import StorageManager from '../../managers/StorageManager';
 import FirestoreManager from '../../firestore/FirestoreManager';
 import OperationRepo from '../../sync/OperationRepo';
@@ -23,8 +23,8 @@ interface TestStorage extends BaseStorageMapping {
   anotherKey: number;
 }
 
-describe('SyncController - Race Conditions', () => {
-  let syncController: SyncController<TestStorage>;
+describe('SyncEngine - Race Conditions', () => {
+  let syncEngine: SyncEngine<TestStorage>;
   let mockStorage: jest.Mocked<StorageManager<TestStorage>>;
   let mockFirestore: jest.Mocked<FirestoreManager<TestStorage>>;
   let mockMetadataManager: jest.Mocked<MetadataManager<TestStorage>>;
@@ -61,10 +61,14 @@ describe('SyncController - Race Conditions', () => {
       backupLastBackupToUserDocument: jest.fn().mockResolvedValue(undefined as never),
     } as any;
 
+    const setMock = jest.fn().mockResolvedValue(undefined as never);
     mockMetadataManager = {
       get: jest.fn(),
       has: jest.fn(),
-      set: jest.fn(),
+      set: setMock,
+      recordLocalChange: setMock,
+      persistLocalChange: setMock,
+      recordSyncedState: setMock,
       remove: jest.fn(),
       clear: jest.fn(),
       updateSyncStatus: jest.fn(),
@@ -74,6 +78,10 @@ describe('SyncController - Race Conditions', () => {
       invalidateCache: jest.fn(),
       cancelPendingOperations: jest.fn()
     } as any;
+    mockMetadataManager.isNeverSynced = jest.fn((key: string) => {
+      const meta = mockMetadataManager.get(key as keyof TestStorage);
+      return !meta?.digest;
+    });
 
     mockOperationRepo = {
       get: jest.fn(),
@@ -107,7 +115,8 @@ describe('SyncController - Race Conditions', () => {
           subcollectionKeys: [] as (keyof TestStorage)[],
         }
       },
-      syncInterval: 1000
+      syncInterval: 1000,
+      autoStartSync: true,
     };
 
     // Set up default mocks for storage and metadata to ensure operations are created
@@ -139,7 +148,7 @@ describe('SyncController - Race Conditions', () => {
     // Set cloudConfig on the firestore mock
     mockFirestore.cloudConfig = mockConfig.cloudConfig;
 
-    syncController = new SyncController(
+    syncEngine = new SyncEngine(
       mockStorage,
       mockFirestore,
       mockMetadataManager,
@@ -151,7 +160,7 @@ describe('SyncController - Race Conditions', () => {
 
   afterEach(() => {
     jest.clearAllMocks();
-    syncController.stopSyncInterval();
+    syncEngine.stopSyncInterval();
   });
 
   describe('Concurrent Sync Prevention', () => {
@@ -171,8 +180,8 @@ describe('SyncController - Race Conditions', () => {
         .mockReturnValueOnce(secondPromise as any);
 
       // Start two concurrent sync operations
-      const sync1Promise = syncController.syncPending();
-      const sync2Promise = syncController.syncPending();
+      const sync1Promise = syncEngine.syncPending();
+      const sync2Promise = syncEngine.syncPending();
 
       // Resolve the first operation
       resolveFirst!();
@@ -190,11 +199,11 @@ describe('SyncController - Race Conditions', () => {
       mockOperationRepo.processOperations.mockResolvedValue([]);
 
       // First sync
-      await syncController.syncPending();
+      await syncEngine.syncPending();
       expect(mockOperationRepo.processOperations).toHaveBeenCalledTimes(1);
 
       // Second sync should be allowed
-      await syncController.syncPending();
+      await syncEngine.syncPending();
       expect(mockOperationRepo.processOperations).toHaveBeenCalledTimes(2);
     });
 
@@ -202,11 +211,11 @@ describe('SyncController - Race Conditions', () => {
       const syncError = new Error('Sync failed');
       mockOperationRepo.processOperations.mockRejectedValue(syncError);
 
-      await expect(syncController.syncPending()).rejects.toThrow('Sync failed');
+      await expect(syncEngine.syncPending()).rejects.toThrow('Sync failed');
 
       // Should allow subsequent syncs after error
       mockOperationRepo.processOperations.mockResolvedValue([]);
-      await syncController.syncPending();
+      await syncEngine.syncPending();
       expect(mockOperationRepo.processOperations).toHaveBeenCalledTimes(2);
     });
   });
@@ -219,7 +228,7 @@ describe('SyncController - Race Conditions', () => {
         { success: true, key: 'testKey' as keyof TestStorage }
       ]);
 
-      await syncController.syncPending();
+      await syncEngine.syncPending();
 
       const afterTime = Date.now();
       expect(mockStorage.set).toHaveBeenCalledWith(
@@ -239,7 +248,7 @@ describe('SyncController - Race Conditions', () => {
       const syncError = new Error('All operations failed');
       mockOperationRepo.processOperations.mockRejectedValue(syncError);
 
-      await expect(syncController.syncPending()).rejects.toThrow();
+      await expect(syncEngine.syncPending()).rejects.toThrow();
 
       expect(mockStorage.set).not.toHaveBeenCalledWith(
         'lastBackup',
@@ -250,7 +259,7 @@ describe('SyncController - Race Conditions', () => {
     it('should not update lastBackup when no operations exist', async () => {
       mockOperationRepo.processOperations.mockResolvedValue([]);
 
-      await syncController.syncPending();
+      await syncEngine.syncPending();
 
       // Should NOT update lastBackup when no operations are processed
       expect(mockStorage.set).not.toHaveBeenCalledWith(
@@ -270,11 +279,11 @@ describe('SyncController - Race Conditions', () => {
       mockOperationRepo.processOperations.mockReturnValue(syncPromise as any);
 
       // Start sync
-      const syncInProgress = syncController.syncPending();
+      const syncInProgress = syncEngine.syncPending();
 
       // Add operations while sync is in progress
-      syncController.markAsPending('testKey');
-      syncController.markAsDeleted('anotherKey');
+      syncEngine.markAsPending('testKey');
+      syncEngine.markAsDeleted('anotherKey');
       jest.runAllTimers();
 
       // With batching, we expect one operation per unique key
@@ -292,7 +301,7 @@ describe('SyncController - Race Conditions', () => {
       });
 
       expect(() => {
-        syncController.markAsPending('testKey');
+        syncEngine.markAsPending('testKey');
         jest.runAllTimers();
       }).toThrow('Operation repo failed');
     });
@@ -300,7 +309,7 @@ describe('SyncController - Race Conditions', () => {
     it('should deduplicate rapid operation additions for the same key', () => {
       // Add the same key rapidly
       for (let i = 0; i < 1000; i++) {
-        syncController.markAsPending('testKey');
+        syncEngine.markAsPending('testKey');
       }
       jest.runAllTimers();
       // With batching, we expect only one operation for the deduplicated key
@@ -314,7 +323,7 @@ describe('SyncController - Race Conditions', () => {
       // Add different keys to test batching efficiency
       for (let i = 0; i < 1000; i++) {
         // Use testKey and anotherKey alternately to test batching with valid keys
-        syncController.markAsPending(i % 2 === 0 ? 'testKey' : 'anotherKey');
+        syncEngine.markAsPending(i % 2 === 0 ? 'testKey' : 'anotherKey');
       }
       jest.runAllTimers();
       const endTime = Date.now();
@@ -328,7 +337,7 @@ describe('SyncController - Race Conditions', () => {
 
       // Start multiple syncs rapidly
       const syncPromises = Array.from({ length: 10 }, () => 
-        syncController.syncPending()
+        syncEngine.syncPending()
       );
 
       await Promise.all(syncPromises);
@@ -342,11 +351,11 @@ describe('SyncController - Race Conditions', () => {
 
       // Add many operations
       for (let i = 0; i < 10000; i++) {
-        syncController.markAsPending('testKey');
+        syncEngine.markAsPending('testKey');
       }
 
       const startTime = Date.now();
-      await syncController.syncPending();
+      await syncEngine.syncPending();
       const endTime = Date.now();
 
       expect(endTime - startTime).toBeLessThan(5000); // Should complete within 5 seconds
@@ -357,10 +366,10 @@ describe('SyncController - Race Conditions', () => {
     it('should properly cleanup sync locks on completion', async () => {
       mockOperationRepo.processOperations.mockResolvedValue([]);
 
-      await syncController.syncPending();
+      await syncEngine.syncPending();
 
       // Should be able to start another sync immediately
-      await syncController.syncPending();
+      await syncEngine.syncPending();
       expect(mockOperationRepo.processOperations).toHaveBeenCalledTimes(2);
     });
 
@@ -368,11 +377,11 @@ describe('SyncController - Race Conditions', () => {
       const syncError = new Error('Sync failed');
       mockOperationRepo.processOperations.mockRejectedValue(syncError);
 
-      await expect(syncController.syncPending()).rejects.toThrow();
+      await expect(syncEngine.syncPending()).rejects.toThrow();
 
       // Should be able to start another sync after error
       mockOperationRepo.processOperations.mockResolvedValue([]);
-      await syncController.syncPending();
+      await syncEngine.syncPending();
       expect(mockOperationRepo.processOperations).toHaveBeenCalledTimes(2);
     });
 
@@ -385,7 +394,7 @@ describe('SyncController - Race Conditions', () => {
       mockOperationRepo.processOperations.mockReturnValue(syncPromise as any);
 
       // Start sync
-      const syncInProgress = syncController.syncPending();
+      const syncInProgress = syncEngine.syncPending();
 
       // Complete sync
       resolveSyncPromise!();
@@ -393,7 +402,7 @@ describe('SyncController - Race Conditions', () => {
 
       // Should be able to start new syncs
       mockOperationRepo.processOperations.mockResolvedValue([]);
-      await syncController.syncPending();
+      await syncEngine.syncPending();
       
       expect(mockOperationRepo.processOperations).toHaveBeenCalledTimes(2);
     });
@@ -405,13 +414,13 @@ describe('SyncController - Race Conditions', () => {
       mockNetworkMonitor.isOnline.mockReturnValue(false);
       mockOperationRepo.processOperations.mockRejectedValue(new Error('Network error'));
 
-      await expect(syncController.syncPending()).rejects.toThrow('Network error');
+      await expect(syncEngine.syncPending()).rejects.toThrow('Network error');
 
       // Simulate network recovery
       mockNetworkMonitor.isOnline.mockReturnValue(true);
       mockOperationRepo.processOperations.mockResolvedValue([]);
 
-      await syncController.syncPending();
+      await syncEngine.syncPending();
       expect(mockOperationRepo.processOperations).toHaveBeenCalledTimes(2);
     });
 
@@ -419,7 +428,7 @@ describe('SyncController - Race Conditions', () => {
       // Mock partial failure scenario
       mockOperationRepo.processOperations.mockResolvedValue([]);
 
-      await syncController.syncPending();
+      await syncEngine.syncPending();
 
       expect(mockOperationRepo.processOperations).toHaveBeenCalledTimes(1);
     });
@@ -430,7 +439,7 @@ describe('SyncController - Race Conditions', () => {
       
       // Add first operation and expect it to throw
       expect(() => {
-        syncController.markAsPending('testKey');
+        syncEngine.markAsPending('testKey');
         jest.runAllTimers(); // First batch
       }).toThrow('fail');
       
@@ -442,7 +451,7 @@ describe('SyncController - Race Conditions', () => {
       mockOperationRepo.addOperation.mockImplementation(() => {});
       
       // Add second operation and verify it works
-      syncController.markAsDeleted('anotherKey');
+      syncEngine.markAsDeleted('anotherKey');
       jest.runAllTimers(); // Second batch
       
       expect(mockOperationRepo.addOperation).toHaveBeenCalledTimes(1);
@@ -450,15 +459,15 @@ describe('SyncController - Race Conditions', () => {
 
     it('should cancel pending operations on logout to prevent race conditions', () => {
       // Add some pending operations with different keys
-      syncController.markAsPending('testKey');
-      syncController.markAsDeleted('anotherKey');
+      syncEngine.markAsPending('testKey');
+      syncEngine.markAsDeleted('anotherKey');
       jest.runAllTimers();
 
       // With batching, we expect one operation per unique key
       expect(mockOperationRepo.addOperation).toHaveBeenCalledTimes(2);
 
       // Cancel pending operations (simulating logout)
-      syncController.cancelPendingOperations();
+      syncEngine.cancelPendingOperations();
 
       // Verify operations were cleared
       expect(mockOperationRepo.clearAll).toHaveBeenCalledTimes(1);

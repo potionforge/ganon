@@ -133,9 +133,12 @@ describe('SetOperation Sync Status Tests', () => {
     ) as jest.Mocked<FirestoreManager<TestStorage>>;
 
     // Create metadata manager with mocked methods
+    const setMock = jest.fn();
     metadataManager = {
       updateSyncStatus: jest.fn(),
-      set: jest.fn(),
+      set: setMock,
+      recordLocalChange: setMock,
+      recordSyncedState: setMock,
       get: jest.fn(),
       remove: jest.fn(),
       getAll: jest.fn(),
@@ -158,6 +161,7 @@ describe('SetOperation Sync Status Tests', () => {
       if (key === 'key1') return Promise.resolve('test-value');
       return Promise.resolve(undefined);
     });
+    (firestoreManager as any).syncValueWithDigest = jest.fn().mockResolvedValue(undefined);
     firestoreManager.runTransaction.mockImplementation(async (callback) => {
       const mockTransaction = {
         get: jest.fn(),
@@ -192,7 +196,7 @@ describe('SetOperation Sync Status Tests', () => {
       await setOperation.execute();
 
       // Verify status was set to Synced
-      expect(metadataManager.set).toHaveBeenCalledWith('key1', expect.objectContaining({
+      expect(metadataManager.recordLocalChange).toHaveBeenCalledWith('key1', expect.objectContaining({
         syncStatus: SyncStatus.Synced,
         version: expect.any(Number),
         digest: 'test-hash'
@@ -201,7 +205,7 @@ describe('SetOperation Sync Status Tests', () => {
 
     it('should set status to Failed when operation throws error', async () => {
       // Make firestore fail
-      firestoreManager.runTransaction.mockRejectedValueOnce(new Error('Test error'));
+      (firestoreManager.syncValueWithDigest as jest.Mock).mockRejectedValueOnce(new Error('Test error'));
 
       // Execute operation
       await setOperation.execute();
@@ -218,7 +222,7 @@ describe('SetOperation Sync Status Tests', () => {
 
       // Verify hash was computed
       expect(computeHash).toHaveBeenCalledWith('test-value');
-      expect(metadataManager.set).toHaveBeenCalledWith('key1', expect.objectContaining({
+      expect(metadataManager.recordLocalChange).toHaveBeenCalledWith('key1', expect.objectContaining({
         digest: 'test-hash'
       }));
     });
@@ -231,7 +235,7 @@ describe('SetOperation Sync Status Tests', () => {
       await undefinedOperation.execute();
 
       // Verify empty string was used as hash
-      expect(metadataManager.set).toHaveBeenCalledWith('key2', expect.objectContaining({
+      expect(metadataManager.recordLocalChange).toHaveBeenCalledWith('key2', expect.objectContaining({
         digest: ''
       }));
     });

@@ -37,6 +37,23 @@ I1 eager-write fixes, semver comparator, `cloudConfig` comment (below). All four
 
 ---
 
+## Post-merge bucket (after Ganon PRs 4+5 land)
+
+Single checklist so follow-ups do not evaporate across repos. None block opening or merging the
+stack; all are the first tranche after the library ships to LTG.
+
+| # | Repo | Item | Notes |
+|---|---|---|---|
+| 1 | **Ganon** | Un-skip conflict-resolution failure test | `SyncController.test.ts` → `it.skip('should handle conflict resolution failure gracefully')`. Original excuse (static-method mocking) is obsolete: `SyncEngine` now accepts injected `Clock` / `Scheduler` / fakes — rewrite against `FakeFirestore` + port injection, no static mocking. Proof the testability investment pays off. |
+| 2 | **LTG app** | `HydrationWaitReason` branching in post-login reload paths | `whenHydrated()` resolves `'hydrated' \| 'logged-out' \| 'login-failed'`. Post-login managers that `await whenHydrated()` must branch on `'logged-out'` and `'login-failed'` (e.g. return before reading user-scoped cache) — especially reload paths that run across logout/login boundaries. |
+| 3 | **LTG app** | I1 — `DataInitializationManager` | Writes default `strugglePreference` before hydrate (`:50-51`). Switch to get-or-default / gate until hydrated. |
+| 4 | **LTG app** | I1 — `NoContactManager` | Writes default no-contact state before hydrate (`:76-84`). Same pattern as `AwardManager.ts:28-42`. |
+
+Items 3–4 are duplicated in **Immediate tickets** below for detail; this table is the
+post-merge rollup.
+
+---
+
 ## Immediate tickets (no Ganon step required)
 
 ### I1 — live eager-write violations
@@ -126,6 +143,10 @@ is a config flip, not an app release. Enable `'v2'` only after both criteria pas
 After sub-step 2 stabilizes, coordinate with library step 6.3. Shrink integrity-recovery
 surface per proposal §4.5 (docKeys first).
 
+**Known deferral (M3):** `DeleteOperation` does not yet remove stale `digestMap` entries.
+Stale entries are mostly harmless under dual-read but will pollute step 6.2 fleet-verification
+queries (`hasAnyRemoteData`, analytics). Track cleanup with 6.2 work.
+
 ---
 
 ## §8 Q4 — LTG verification (behavior-neutral unification)
@@ -134,6 +155,15 @@ LetThemGo's `ganon.ts` does **not** pass `conflictResolutionConfig` (`ganon.ts:8
 Both data and metadata use Ganon's default `LAST_MODIFIED_WINS` (`SyncController.ts:111-112`).
 Routing metadata conflicts through `GanonConfig.conflictResolutionConfig` (proposal §6 step 4)
 is **behavior-neutral for LTG today**.
+
+### `autoStartSync` — explicit in LTG today
+
+LTG's README example and `ganon.ts` wiring pass `autoStartSync: true` explicitly
+(`README.md` config sample). Omitted `autoStartSync` now resolves to `true` everywhere
+via `resolveGanonConfig` (sync interval, hydration on init/login, and legacy metadata
+flush scheduling). This unifies a pre-v2.5 asymmetry where omitted `autoStartSync`
+scheduled metadata flushes but did not auto-start sync/hydration. **LTG blast radius:
+zero** — already explicit. New consumers should treat omission as opt-in to full auto-sync.
 
 ---
 
@@ -174,9 +204,22 @@ Once library step 8 lands (`getOrDefault`, `whenHydrated`, `earlyWriteGuard`):
 3. **Migrate managers** to `await ganon.whenHydrated()` after login for cloud-synced writes
    (not at module init on cold guest start).
 4. **Enable guards:** `earlyWriteGuard: 'warn'` in dev builds; `'throw'` in jest setup for
-   post-login pre-hydrate paths.
+   post-login pre-hydrate paths. Login failures settle the hydration cycle with
+   `'login-failed'` before rethrowing so a failed restore/backup does not leave writes blocked
+   under `'throw'` and `whenHydrated()` waiters can branch to retry or surface an error.
 5. **Migrate test recipe:** replace per-file `jest.mock("@/services/ganon/ganon")` with
    `LocalGanon` over `MMKVFaker` (proposal §5 pattern).
+
+### Known issue — `login()` retry noop after transient failure
+
+`login()` sets the identifier before `hasAnyRemoteData()` / restore. If restore or backup
+throws, the user is half-logged-in (identifier set, remote data not restored). A retry of
+`login(sameUserId)` hits the same-user noop path and **never restores remote data**. Pre-existing
+ordering; more visible now that waiters pending at failure resolve `'login-failed'`; subsequent
+`whenHydrated()` calls on the half-state resolve `'hydrated'` until the ordering fix lands.
+**Candidate fix (separate PR):** roll back the identifier write in the login catch, or resolve
+waiters as `'logged-out'` and clear the identifier. Do not fold into the step 4+5 merge — partial
+guest/local data mixing on rollback needs product thought.
 
 ---
 
