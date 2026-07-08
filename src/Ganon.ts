@@ -36,6 +36,8 @@ export default class Ganon<T extends Record<string, any> & BaseStorageMapping> i
   private hydrationWaiters: Array<{ resolve: (reason: HydrationWaitReason) => void; cycle: number }> = [];
   private hydrationCycle = 0;
   private hydrationSettled = true;
+  /** Last settle reason for the current cycle; late whenHydrated() reads this when settled. */
+  private hydrationSettleReason: HydrationWaitReason = 'hydrated';
   private readonly resolvedConfig: ResolvedGanonConfig<T>;
 
   private readonly _listeners = new Map<
@@ -116,10 +118,18 @@ export default class Ganon<T extends Record<string, any> & BaseStorageMapping> i
   }
 
   /**
-   * Starts the automatic synchronization process with the cloud.
+   * Starts sync interval and, when resuming after `stopSync()`, re-arms hydration so
+   * `whenHydrated()` waiters settle honestly via `onHydrationComplete`.
    */
   startSync(): void {
-    this.syncEngine.startSyncInterval();
+    if (
+      this.isUserLoggedIn() &&
+      this.hydrationSettled &&
+      this.hydrationSettleReason === 'stopped'
+    ) {
+      this.hydrationSettled = false;
+    }
+    this.syncEngine.start();
   }
 
   /**
@@ -134,6 +144,9 @@ export default class Ganon<T extends Record<string, any> & BaseStorageMapping> i
    * Used internally by `logout()` (after `backup()`) and `destroy()`.
    */
   stopSync(): void {
+    if (this._isHydrationPending()) {
+      this._settleHydrationWaiters('stopped');
+    }
     this.syncEngine.stop();
   }
 
@@ -162,8 +175,9 @@ export default class Ganon<T extends Record<string, any> & BaseStorageMapping> i
    * Resolves when Ganon's hydration settles for the current login cycle.
    * Pending before first login; waiters resolve on logout; fresh pending per new login.
    * Resolves with `'hydrated'` when Ganon's hydration settles, `'logged-out'` if logout
-   * resolved the waiter first, or `'login-failed'` if `login()` threw after beginning the
-   * hydration cycle. Consumer-side post-login merges may not have applied yet.
+   * resolved the waiter first, `'login-failed'` if `login()` threw after beginning the
+   * hydration cycle, or `'stopped'` if `stopSync()`/`destroy()` tore down sync before
+   * hydration completed. Consumer-side post-login merges may not have applied yet.
    */
   whenHydrated(): Promise<HydrationWaitReason> {
     if (this.isDestroyed) {
@@ -177,7 +191,7 @@ export default class Ganon<T extends Record<string, any> & BaseStorageMapping> i
       });
     }
     if (!this._isHydrationPending()) {
-      return Promise.resolve('hydrated');
+      return Promise.resolve(this.hydrationSettleReason);
     }
     return new Promise(resolve => {
       this.hydrationWaiters.push({ resolve, cycle: this.hydrationCycle });
@@ -487,6 +501,10 @@ export default class Ganon<T extends Record<string, any> & BaseStorageMapping> i
         await this.backup();
       }
     } finally {
+      // Settle waiters before stopSync so logout resolves 'logged-out', not 'stopped'.
+      if (this._isHydrationPending()) {
+        this._settleHydrationWaiters('logged-out');
+      }
       // Stop sync and cancel pending operations
       this.stopSync();
       this.syncEngine.cancelPendingOperations();
@@ -589,6 +607,7 @@ export default class Ganon<T extends Record<string, any> & BaseStorageMapping> i
 
   private _settleHydrationWaiters(reason: HydrationWaitReason = 'hydrated'): void {
     this.hydrationSettled = true;
+    this.hydrationSettleReason = reason;
     const cycle = this.hydrationCycle;
     const waiters = this.hydrationWaiters.filter(w => w.cycle === cycle || w.cycle === 0);
     this.hydrationWaiters = this.hydrationWaiters.filter(w => w.cycle !== cycle && w.cycle !== 0);
@@ -606,6 +625,7 @@ export default class Ganon<T extends Record<string, any> & BaseStorageMapping> i
     this._resolveHydrationWaitersOnLogout();
     this.hydrationCycle += 1;
     this.hydrationSettled = true;
+    this.hydrationSettleReason = 'logged-out';
   }
 
   private _guardEarlyWrite(key: Extract<keyof T, string>): void {
