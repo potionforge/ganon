@@ -9,6 +9,7 @@ import { checkIfNeedsChunking } from './helpers/chunkValidation';
 import { reconstructChunkedData } from './helpers/chunkReconstruction';
 import { generateChunks } from './helpers/chunkGeneration';
 import { BaseStorageMapping } from '../../models/storage/BaseStorageMapping';
+import { Scheduler, SystemScheduler } from '../../ports/Scheduler';
 export interface ChunkedData {
   chunks: Array<[string, any]>;
   isChunked: boolean;
@@ -43,7 +44,8 @@ export default class ChunkManager<T extends BaseStorageMapping> {
 
   constructor(
     private adapter: FirestoreAdapter<T>,
-    dataProcessor?: DataProcessor
+    dataProcessor?: DataProcessor,
+    private scheduler: Scheduler = new SystemScheduler()
   ) {
     this.dataProcessor = dataProcessor || new DataProcessor();
   }
@@ -544,7 +546,7 @@ export default class ChunkManager<T extends BaseStorageMapping> {
 
             // Small delay between batches to prevent overwhelming Firestore
             if (i + this.BATCH_SIZE < newChunks.length) {
-              await new Promise(resolve => setTimeout(resolve, this.BATCH_DELAY));
+              await this.scheduler.delay(this.BATCH_DELAY);
             }
           }
         }
