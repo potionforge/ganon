@@ -8,6 +8,7 @@ import type { RemoteDataProbeResult } from "../sync/RemoteDataProbeResult";
 
 export interface ISyncEngine<T extends BaseStorageMapping> {
   start(): void;
+  stop(): void;
   startSyncInterval(): void;
   stopSyncInterval(): void;
   syncPending(): void;
