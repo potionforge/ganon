@@ -83,7 +83,9 @@ export default class SyncEngine<T extends BaseStorageMapping> implements ISyncEn
     }
 
     if (this.userManager.isUserLoggedIn()) {
-      this.hydrate();
+      void this.hydrate().catch(err => {
+        Log.error(`Ganon: error hydrating on start: ${err}`);
+      });
     }
   }
 
@@ -618,6 +620,7 @@ export default class SyncEngine<T extends BaseStorageMapping> implements ISyncEn
       return result;
     } catch (error) {
       Log.error(`Ganon: error hydrating data from Firestore: ${error}`);
+      this.config.eventCallbacks?.onHydrationComplete?.(this._emptyRestoreResult);
       throw error;
     } finally {
       this.hydrationPromise = null;
@@ -763,6 +766,7 @@ export default class SyncEngine<T extends BaseStorageMapping> implements ISyncEn
       return result;
     } catch (error) {
       Log.error(`Ganon: error force hydrating data from Firestore: ${error}`);
+      this.config.eventCallbacks?.onHydrationComplete?.(this._emptyRestoreResult);
       throw error;
     } finally {
       this.hydrationPromise = null;

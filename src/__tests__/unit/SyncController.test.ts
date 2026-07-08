@@ -1726,5 +1726,44 @@ describe('SyncEngine Tests', () => {
       expect(result.restoredKeys).toHaveLength(0);
       expect(result.failedKeys).toContain('testKey');
     });
+
+    it('calls onHydrationComplete before rethrowing when hydrate fails catastrophically', async () => {
+      const onHydrationComplete = jest.fn();
+      const configWithCallback: GanonConfig<TestStorage> = {
+        ...mockConfig,
+        eventCallbacks: { onHydrationComplete },
+      };
+      const engine = new SyncEngine(
+        mockStorage,
+        mockFirestore,
+        mockMetadataManager,
+        mockOperationRepo,
+        mockUserManager,
+        configWithCallback
+      );
+
+      jest.spyOn(engine as any, '_processKeys').mockRejectedValue(new Error('catastrophic hydrate failure'));
+
+      await expect(engine.hydrate()).rejects.toThrow('catastrophic hydrate failure');
+      expect(onHydrationComplete).toHaveBeenCalledTimes(1);
+      expect(onHydrationComplete).toHaveBeenCalledWith(
+        expect.objectContaining({
+          success: false,
+          restoredKeys: [],
+          failedKeys: [],
+          integrityFailures: [],
+        })
+      );
+    });
+
+    it('start() swallows hydrate rejection without unhandled promise rejection', async () => {
+      const hydrateSpy = jest.spyOn(syncEngine, 'hydrate').mockRejectedValue(new Error('start hydrate failed'));
+
+      syncEngine.start();
+      await Promise.resolve();
+
+      expect(hydrateSpy).toHaveBeenCalledTimes(1);
+      hydrateSpy.mockRestore();
+    });
   });
 });
