@@ -7,6 +7,7 @@ import { ConflictResolutionConfig } from "../config/ConflictResolutionConfig";
 
 export interface ISyncEngine<T extends BaseStorageMapping> {
   start(): void;
+  stop(): void;
   startSyncInterval(): void;
   stopSyncInterval(): void;
   syncPending(): void;

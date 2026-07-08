@@ -29,6 +29,9 @@ import { Clock, SystemClock } from "../ports/Clock";
 import { CancelHandle, Scheduler, SystemScheduler } from "../ports/Scheduler";
 import KeyRouter from "../routing/KeyRouter";
 
+/** Debounce delay for batched markAsPending → metadata flush scheduling. */
+export const MARK_AS_PENDING_DEBOUNCE_MS = 50;
+
 /**
  * Controller responsible for managing synchronization between local storage and Firestore.
  * Handles operations like backup, restore, and hydration of data.
@@ -41,7 +44,7 @@ export default class SyncEngine<T extends BaseStorageMapping> implements ISyncEn
   // Debounce batching for markAsPending
   private _pendingMarkKeys: Set<Extract<keyof T, string>> = new Set();
   private _markDebounceHandle: CancelHandle | null = null;
-  private readonly _MARK_DEBOUNCE_DELAY = 50; // ms
+  private readonly _MARK_DEBOUNCE_DELAY = MARK_AS_PENDING_DEBOUNCE_MS;
 
   // Per-invocation integrity config
   private _currentIntegrityConfig?: Partial<IntegrityFailureConfig>;
@@ -54,6 +57,10 @@ export default class SyncEngine<T extends BaseStorageMapping> implements ISyncEn
 
   private keyRouter: KeyRouter<T>;
   private resolvedConfig: ResolvedGanonConfig<T>;
+  /** True after start() arms the engine; cleared by stop(). Idempotent start while running. */
+  private running = false;
+  /** Bumped on stop() to invalidate in-flight hydrate passes across identity boundaries. */
+  private hydrationGeneration = 0;
 
   constructor(
     private storage: StorageManager<T>,
@@ -76,6 +83,11 @@ export default class SyncEngine<T extends BaseStorageMapping> implements ISyncEn
    * Constructor is side-effect free (step 7).
    */
   start(): void {
+    if (this.running) {
+      Log.verbose('Ganon: SyncEngine.start skipped — already running');
+      return;
+    }
+    this.running = true;
 
     if (this.resolvedConfig.autoStartSync) {
       this.startSyncInterval();
@@ -86,6 +98,37 @@ export default class SyncEngine<T extends BaseStorageMapping> implements ISyncEn
         Log.error(`Ganon: error hydrating on start: ${err}`);
       });
     }
+  }
+
+  /**
+   * Stops sync interval and clears running state so a later start() fully re-arms.
+   * Called on logout teardown; distinct from stopSyncInterval() alone.
+   *
+   * Teardown semantics: discards the pending markAsPending set rather than flushing
+   * it. Flushing here would route through recordLocalChange -> flushQueue.enqueue and
+   * re-arm a remote flush against the session being torn down (the hazard this method
+   * exists to prevent), so a bare stop() intentionally drops unflushed marks. Callers
+   * that need those writes must flush before stop() (logout() does so via backup()).
+   */
+  stop(): void {
+    Log.verbose('Ganon: SyncEngine.stop');
+    this.running = false;
+    this.hydrationGeneration += 1;
+    // Release the dedupe handle so a later start()/hydrate() runs a fresh pass instead of
+    // awaiting the now generation-dead in-flight promise. The orphaned pass still completes
+    // internally but its generation guard prevents any write or waiter settlement.
+    this.hydrationPromise = null;
+    // Cancel a debounced markAsPending flush so it can't fire against a torn-down session.
+    if (this._markDebounceHandle) {
+      this._markDebounceHandle.cancel();
+      this._markDebounceHandle = null;
+    }
+    this._pendingMarkKeys.clear();
+    this.stopSyncInterval();
+  }
+
+  private _isHydrationStale(generation: number): boolean {
+    return generation !== this.hydrationGeneration;
   }
 
   /**
@@ -432,6 +475,8 @@ export default class SyncEngine<T extends BaseStorageMapping> implements ISyncEn
       return this._emptyRestoreResult;
     }
 
+    const hydrationGen = this.hydrationGeneration;
+
     // If hydration is already in progress, return the existing promise
     if (this.hydrationPromise) {
       Log.info("Ganon: hydration already in progress, returning existing promise");
@@ -440,9 +485,15 @@ export default class SyncEngine<T extends BaseStorageMapping> implements ISyncEn
 
     try {
       this.hydrationPromise = this._processKeys(async (key) => {
+        if (this._isHydrationStale(hydrationGen) || !this.userManager.isUserLoggedIn()) {
+          return false;
+        }
         const needsHydration = await this.metadataManager.needsHydration(key);
 
         if (needsHydration) {
+          if (this._isHydrationStale(hydrationGen) || !this.userManager.isUserLoggedIn()) {
+            return false;
+          }
           const remoteValue = await this.firestore.fetch(key);
           if (remoteValue !== undefined) {
             const remoteComputedDigest = computeHash(remoteValue);
@@ -479,6 +530,9 @@ export default class SyncEngine<T extends BaseStorageMapping> implements ISyncEn
               }, config.strategy, config.mergeStrategy);
 
               if (resolution.success) {
+                if (this._isHydrationStale(hydrationGen) || !this.userManager.isUserLoggedIn()) {
+                  return false;
+                }
                 // Apply resolved value and update metadata
                 this.storage.set(key, resolution.resolvedValue!);
 
@@ -539,6 +593,9 @@ export default class SyncEngine<T extends BaseStorageMapping> implements ISyncEn
 
             // Only store the data if we have valid remote metadata and the integrity check passed
             if (remoteMetadata && remoteComputedDigest === remoteMetadata.digest) {
+              if (this._isHydrationStale(hydrationGen) || !this.userManager.isUserLoggedIn()) {
+                return false;
+              }
               this.storage.set(key, remoteValue as T[Extract<keyof T, string>]);
               await this.metadataManager.recordSyncedState(key, {
                 syncStatus: SyncStatus.Synced,
@@ -559,6 +616,10 @@ export default class SyncEngine<T extends BaseStorageMapping> implements ISyncEn
 
       const result = await this.hydrationPromise;
 
+      if (this._isHydrationStale(hydrationGen)) {
+        return this._emptyRestoreResult;
+      }
+
       this.config.eventCallbacks?.onHydrationComplete?.(result);
 
       // After hydration completes, trigger a sync if there are pending operations
@@ -573,7 +634,11 @@ export default class SyncEngine<T extends BaseStorageMapping> implements ISyncEn
       this.config.eventCallbacks?.onHydrationComplete?.(this._emptyRestoreResult);
       throw error;
     } finally {
-      this.hydrationPromise = null;
+      // Only clear our own dedupe handle. A stale pass resolving late must not null out
+      // the fresh session's in-flight promise (stop() already released the stale handle).
+      if (!this._isHydrationStale(hydrationGen)) {
+        this.hydrationPromise = null;
+      }
     }
   }
 
@@ -597,6 +662,8 @@ export default class SyncEngine<T extends BaseStorageMapping> implements ISyncEn
       return this._emptyRestoreResult;
     }
 
+    const hydrationGen = this.hydrationGeneration;
+
     // If hydration is already in progress, return the existing promise
     if (this.hydrationPromise) {
       Log.info("Ganon: hydration already in progress, returning existing promise");
@@ -605,6 +672,9 @@ export default class SyncEngine<T extends BaseStorageMapping> implements ISyncEn
 
     try {
       this.hydrationPromise = this._processKeys(async (key) => {
+        if (this._isHydrationStale(hydrationGen) || !this.userManager.isUserLoggedIn()) {
+          return false;
+        }
         // Force cache invalidation to ensure fresh remote metadata
         await this.metadataManager.invalidateCacheForHydration(key);
 
@@ -640,6 +710,9 @@ export default class SyncEngine<T extends BaseStorageMapping> implements ISyncEn
             }, this._conflictResolutionConfig.strategy, this._conflictResolutionConfig.mergeStrategy);
 
             if (resolution.success) {
+              if (this._isHydrationStale(hydrationGen) || !this.userManager.isUserLoggedIn()) {
+                return false;
+              }
               this.storage.set(key, resolution.resolvedValue!);
             } else {
               Log.warn(`Ganon: Conflict resolution failed for key ${key}, skipping`);
@@ -686,6 +759,9 @@ export default class SyncEngine<T extends BaseStorageMapping> implements ISyncEn
 
           // Only store the data if we have valid remote metadata and the integrity check passed
           if (remoteMetadata && remoteComputedDigest === remoteMetadata.digest) {
+            if (this._isHydrationStale(hydrationGen) || !this.userManager.isUserLoggedIn()) {
+              return false;
+            }
             this.storage.set(key, remoteValue as T[Extract<keyof T, string>]);
             await this.metadataManager.recordSyncedState(key, {
               syncStatus: SyncStatus.Synced,
@@ -705,6 +781,10 @@ export default class SyncEngine<T extends BaseStorageMapping> implements ISyncEn
 
       const result = await this.hydrationPromise;
 
+      if (this._isHydrationStale(hydrationGen)) {
+        return this._emptyRestoreResult;
+      }
+
       this.config.eventCallbacks?.onHydrationComplete?.(result);
 
       // After hydration completes, trigger a sync if there are pending operations
@@ -719,7 +799,11 @@ export default class SyncEngine<T extends BaseStorageMapping> implements ISyncEn
       this.config.eventCallbacks?.onHydrationComplete?.(this._emptyRestoreResult);
       throw error;
     } finally {
-      this.hydrationPromise = null;
+      // Only clear our own dedupe handle. A stale pass resolving late must not null out
+      // the fresh session's in-flight promise (stop() already released the stale handle).
+      if (!this._isHydrationStale(hydrationGen)) {
+        this.hydrationPromise = null;
+      }
     }
   }
 
@@ -792,7 +876,7 @@ export default class SyncEngine<T extends BaseStorageMapping> implements ISyncEn
    */
   destroy(): void {
     Log.verbose('Ganon: SyncEngine.destroy');
-    this.stopSyncInterval();
+    this.stop();
     this.operationRepo.clearAll();
   }
 
@@ -806,6 +890,10 @@ export default class SyncEngine<T extends BaseStorageMapping> implements ISyncEn
 
     // Clear pending operations from the operation repo
     this.operationRepo.clearAll();
+
+    // Note: the markAsPending debounce handle is intentionally owned by stop(), not here.
+    // Ganon.logout() calls both; a standalone cancelPendingOperations() leaves the debounce
+    // running because it is a start/stop lifecycle concern, not a queued-operation concern.
   }
 
   /* P R I V A T E */
