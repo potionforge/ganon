@@ -50,7 +50,6 @@ export default class DependencyFactory<T extends BaseStorageMapping> {
       this.referenceManager = new FirestoreReferenceManager<T>(
         this.userManager,
         config.cloudConfig,
-        this.keyRouter,
         firestoreModule
       );
       this.firestoreManager = new FirestoreManager<T>(

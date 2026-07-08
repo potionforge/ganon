@@ -7,13 +7,11 @@ import { MMKVFaker } from '../../utils/MMKVFaker';
 import { MOCK_CLOUD_BACKUP_CONFIG, TestStorageMapping } from '../../__mocks__/MockConfig';
 import { clearMockStore, getFirestore, getMockStore } from '@react-native-firebase/firestore';
 import { DIGEST_MAP_KEY } from '../../constants';
-import KeyRouter from '../../routing/KeyRouter';
 import { FakeScheduler } from '../utils/FakeScheduler';
 
 function createFirestoreManager(storage: StorageManager<TestStorageMapping>) {
   const userManager = new UserManager<TestStorageMapping>('email', storage);
   const cloudConfig = MOCK_CLOUD_BACKUP_CONFIG;
-  const keyRouter = new KeyRouter(cloudConfig);
   const firestoreModule = getFirestore();
   const adapter = new FirestoreAdapter<TestStorageMapping>(
     { identifierKey: 'email', cloudConfig },
@@ -22,7 +20,6 @@ function createFirestoreManager(storage: StorageManager<TestStorageMapping>) {
   const referenceManager = new FirestoreReferenceManager<TestStorageMapping>(
     userManager,
     cloudConfig,
-    keyRouter,
     firestoreModule
   );
   const firestoreManager = new FirestoreManager<TestStorageMapping>(
@@ -75,5 +72,9 @@ describe('FirestoreManager digest writes', () => {
     });
     expect(raw[`${DIGEST_MAP_KEY}.settings`]).toBeUndefined();
     expect(raw.settings).toBeUndefined();
+
+    const { ref } = referenceManager.getRefForKey('settings');
+    const chunkPath = `${ref.path}/chunk_0`;
+    expect(getMockStore().get(chunkPath)).toMatchObject({ theme: 'dark' });
   });
 });
