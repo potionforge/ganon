@@ -133,6 +133,13 @@ Leave `digestReadMode: 'dual'` (library default for sub-step 1).
 - **Legacy-vs-legacy (transition window):** old clients had the spread hazard among themselves;
   new clients are shielded by dual-read (higher-version-wins vs in-document digest). Sunset
   decision in sub-step 3 should account for remaining legacy-only writers.
+- **Legacy map flush at logout (pre-existing):** `logout()` runs `backup()` (which writes data
+  and in-document digest atomically via `syncValueWithDigest`), then `cancelPendingOperations()`
+  which cancels the debounced `MetadataFlushQueue` without flushing (~1s debounce). A legacy-only
+  client reading that user's doc may see a stale `remote_metadata` entry while the in-document
+  digest is current. Not data loss — dual-read protects new clients — but a mixed-fleet read
+  hazard until sub-step 3 stops writing the legacy map. Fix path: drain `syncToRemote()` on all
+  coordinators before teardown, or accept until legacy map sunset.
 
 ### Sub-step 2 — acceptance criteria (both signals must agree)
 
