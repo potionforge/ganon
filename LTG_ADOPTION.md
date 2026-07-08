@@ -121,6 +121,19 @@ analytics, and wiring the read-mode knob to remote flags.
 
 Leave `digestReadMode: 'dual'` (library default for sub-step 1).
 
+**Known flush races (library step 6.1, documented — not fixed in this series):**
+
+- **Stale re-assertion (fixed in 6.1):** spreading the cached `remote_metadata` map into flush
+  payloads regressed concurrent writers' entries. Fixed by writing pending keys only; Firestore
+  `merge: true` deep-merges nested map entries.
+- **Fetch→resolve→write on pending keys (pre-existing):** another client can update a pending
+  key between pre-flush fetch and `setDocument`; LAST_MODIFIED_WINS resolves against a snapshot
+  that may be stale. Same window as main, minus the spread hazard. Closing fully needs a
+  Firestore transaction — out of scope for step 6.1.
+- **Legacy-vs-legacy (transition window):** old clients had the spread hazard among themselves;
+  new clients are shielded by dual-read (higher-version-wins vs in-document digest). Sunset
+  decision in sub-step 3 should account for remaining legacy-only writers.
+
 ### Sub-step 2 — acceptance criteria (both signals must agree)
 
 Do **not** switch to `digestReadMode: 'v2'` until **both** pass:

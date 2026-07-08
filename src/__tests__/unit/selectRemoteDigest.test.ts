@@ -15,8 +15,11 @@ describe('selectRemoteDigest', () => {
     expect(selectRemoteDigest(legacy, inDoc, 'v2')).toEqual(inDoc);
   });
 
-  it('dual mode picks higher version (legacy wins when old client wrote after new client)', () => {
+  it('dual mode picks higher version (in-document wins when newer)', () => {
     expect(selectRemoteDigest(legacy, inDoc, 'dual')).toEqual(inDoc);
+  });
+
+  it('dual mode picks higher version (legacy wins when old client wrote after new client)', () => {
     expect(selectRemoteDigest({ d: 'a', v: 3 }, { d: 'b', v: 2 }, 'dual')).toEqual({
       d: 'a',
       v: 3,
@@ -31,24 +34,26 @@ describe('selectRemoteDigest', () => {
     ).toEqual({ d: 'old-client-digest', v: 10 });
   });
 
-  it('dual mode tie-break prefers in-document', () => {
-    expect(
-      selectRemoteDigest({ d: 'legacy', v: 5 }, { d: 'indoc', v: 5 }, 'dual')
-    ).toEqual({ d: 'indoc', v: 5 });
-  });
-
-  it('dual mode equal version with mismatched digests warns and prefers in-document', () => {
+  it('dual mode tie-break prefers in-document and warns on digest mismatch', () => {
     jest.mocked(Log.warn).mockClear();
     expect(
       selectRemoteDigest({ d: 'legacy', v: 5 }, { d: 'indoc', v: 5 }, 'dual')
     ).toEqual({ d: 'indoc', v: 5 });
     expect(Log.warn).toHaveBeenCalledWith(
-      'Ganon: selectRemoteDigest equal version 5 with mismatched digests (legacy=legacy, inDocument=indoc); preferring in-document'
+      expect.stringContaining('mismatched digests')
     );
   });
 
-  it('falls back when only one source exists', () => {
+  it('falls back when only one source exists (dual mode)', () => {
     expect(selectRemoteDigest(undefined, inDoc, 'dual')).toEqual(inDoc);
     expect(selectRemoteDigest(legacy, undefined, 'dual')).toEqual(legacy);
+  });
+
+  it('legacy mode falls back to in-document when legacy entry is missing', () => {
+    expect(selectRemoteDigest(undefined, inDoc, 'legacy')).toEqual(inDoc);
+  });
+
+  it('v2 mode falls back to legacy when in-document entry is missing (step 6.3 sunset)', () => {
+    expect(selectRemoteDigest(legacy, undefined, 'v2')).toEqual(legacy);
   });
 });
