@@ -279,6 +279,59 @@ describe('SyncEngine start/stop lifecycle', () => {
     expect(metadataManager.recordLocalChange).not.toHaveBeenCalled();
   });
 
+  it('stop() invalidates remote metadata caches without cancelPendingOperations', () => {
+    const scheduler = new FakeScheduler();
+    const metadataManager = createMockMetadataManager<TestStorage>();
+    const engine = createEngine(
+      scheduler,
+      { autoStartSync: false },
+      { metadataManager }
+    );
+
+    engine.stop();
+
+    expect(metadataManager.invalidateAllRemoteCaches).toHaveBeenCalled();
+    expect(metadataManager.cancelPendingOperations).not.toHaveBeenCalled();
+  });
+
+  it('stale in-flight restore cannot write after stop() invalidates the session', async () => {
+    const scheduler = new FakeScheduler();
+    const storage = createMockStorageManager<TestStorage>();
+    const metadataManager = createMockMetadataManager<TestStorage>();
+    const firestore = createMockFirestoreManager<TestStorage>();
+    const userManager = createMockUserManager<TestStorage>();
+    userManager.isUserLoggedIn.mockReturnValue(true);
+
+    let releaseFetch!: (value: string) => void;
+    const fetchGate = new Promise<string>(resolve => {
+      releaseFetch = resolve;
+    });
+
+    const remoteValue = 'stale-restore-value';
+
+    metadataManager.hydrateMetadata.mockResolvedValue(undefined);
+    firestore.fetch.mockImplementation(() => fetchGate);
+
+    const engine = createEngine(
+      scheduler,
+      { autoStartSync: false },
+      { storage, metadataManager, firestore, userManager }
+    );
+
+    const restorePromise = engine.restore();
+    await Promise.resolve();
+
+    engine.stop();
+
+    releaseFetch(remoteValue);
+    await restorePromise;
+    await new Promise<void>(resolve => setImmediate(resolve));
+
+    expect(storage.set).not.toHaveBeenCalled();
+    expect(metadataManager.recordSyncedState).not.toHaveBeenCalled();
+    expect(firestore.fetch).toHaveBeenCalledTimes(1);
+  });
+
   it('stale in-flight forceHydrate cannot recover via integrity failure after stop()', async () => {
     const scheduler = new FakeScheduler();
     const storage = createMockStorageManager<TestStorage>();

@@ -56,7 +56,7 @@ export default class MetadataManager<T extends BaseStorageMapping> {
     coordinator.updateSyncStatus(key, status);
   }
 
-  async hydrateMetadata(): Promise<void> {
+  async hydrateMetadata(session: { isStale(): boolean }): Promise<void> {
     Log.info('Ganon: MetadataManager.hydrateMetadata');
     if (!this.config?.cloudConfig) return;
 
@@ -91,6 +91,11 @@ export default class MetadataManager<T extends BaseStorageMapping> {
         })
         .join(' | ');
       throw new Error(`Metadata hydrate failed for backup document(s): ${details}`);
+    }
+
+    if (session.isStale()) {
+      // Stale pass: pure no-op — do not seed or clear lastRemoteSnapshot (teardown owns cleanup).
+      return;
     }
 
     this.lastRemoteSnapshot = {};
@@ -164,6 +169,25 @@ export default class MetadataManager<T extends BaseStorageMapping> {
     const coordinator = this._getCoordinator(key);
     if (!coordinator) return;
     coordinator.invalidateCache();
+  }
+
+  /**
+   * Invalidate in-memory remote metadata caches on all coordinators (no flush cancel).
+   * Used by SyncEngine.stop() so teardown clears stale coordinator cache without dropping
+   * MetadataFlushQueue debounced legacy-map flushes — those stay owned by cancelPendingOperations().
+   */
+  invalidateAllRemoteCaches(): void {
+    Log.verbose('Ganon: MetadataManager.invalidateAllRemoteCaches');
+    if (!this.config?.cloudConfig) {
+      return;
+    }
+
+    Object.keys(this.config.cloudConfig).forEach(documentName => {
+      const coordinator = this.coordinatorRepo.getCoordinator(documentName as Extract<keyof T, string>);
+      if (coordinator) {
+        coordinator.invalidateCache();
+      }
+    });
   }
 
   /**
