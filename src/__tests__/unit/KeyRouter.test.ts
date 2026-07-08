@@ -47,4 +47,34 @@ describe('KeyRouter', () => {
   it('allCloudKeys returns every configured key', () => {
     expect(router.allCloudKeys().sort()).toEqual(['bigData', 'key1', 'key2']);
   });
+
+  it('throws on duplicate key across documents', () => {
+    const duplicateConfig = {
+      profile: {
+        docKeys: ['key1'] as Extract<keyof TestMapping, string>[],
+        subcollectionKeys: [] as Extract<keyof TestMapping, string>[],
+      },
+      other: {
+        docKeys: ['key1'] as Extract<keyof TestMapping, string>[],
+        subcollectionKeys: [] as Extract<keyof TestMapping, string>[],
+      },
+    };
+
+    expect(() => new KeyRouter<TestMapping>(duplicateConfig)).toThrow(
+      'Ganon: duplicate cloud key "key1"'
+    );
+  });
+
+  it('throws when the same key appears in docKeys and subcollectionKeys', () => {
+    const ambiguousConfig = {
+      profile: {
+        docKeys: ['key1'] as Extract<keyof TestMapping, string>[],
+        subcollectionKeys: ['key1'] as Extract<keyof TestMapping, string>[],
+      },
+    };
+
+    expect(() => new KeyRouter<TestMapping>(ambiguousConfig)).toThrow(
+      'Ganon: duplicate cloud key "key1"'
+    );
+  });
 });

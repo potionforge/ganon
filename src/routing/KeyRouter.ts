@@ -10,22 +10,22 @@ export type RouteResult = {
 
 /**
  * Single source of truth for key → Firestore document routing.
- * Built once from cloudConfig at init.
+ * Built once from cloudConfig at construction; routes are immutable thereafter.
+ * cloudConfig is not re-read on route() — callers must rebuild if config changes.
  */
 export default class KeyRouter<T extends BaseStorageMapping> {
   private readonly routes = new Map<KeyOf<T>, RouteResult>();
 
   constructor(cloudConfig: CloudBackupConfig<T>) {
-    if (!cloudConfig) return;
     for (const [documentName, config] of Object.entries(cloudConfig)) {
       if (config.docKeys) {
         for (const key of config.docKeys) {
-          this.routes.set(key, { document: documentName, kind: 'docField' });
+          this.register(key, { document: documentName, kind: 'docField' });
         }
       }
       if (config.subcollectionKeys) {
         for (const key of config.subcollectionKeys) {
-          this.routes.set(key, { document: documentName, kind: 'subcollection' });
+          this.register(key, { document: documentName, kind: 'subcollection' });
         }
       }
     }
@@ -43,7 +43,13 @@ export default class KeyRouter<T extends BaseStorageMapping> {
     return Array.from(this.routes.keys());
   }
 
-  documentForKey(key: KeyOf<T>): string | undefined {
-    return this.routes.get(key)?.document;
+  private register(key: KeyOf<T>, route: RouteResult): void {
+    const existing = this.routes.get(key);
+    if (existing) {
+      throw new Error(
+        `Ganon: duplicate cloud key "${key}" registered to "${existing.document}" (${existing.kind}) and "${route.document}" (${route.kind})`
+      );
+    }
+    this.routes.set(key, route);
   }
 }
