@@ -216,6 +216,37 @@ describe('Ganon whenHydrated lifecycle', () => {
     await expect(loginPromise).resolves.toBe('restore');
   });
 
+  it('resolves whenHydrated waiters when hydrate rejects after onHydrationComplete', async () => {
+    const ganon = createGanon({ autoStartSync: true });
+    mockUserManager.isUserLoggedIn.mockImplementation(() => mockStorageManager.get('email') != null);
+    mockStorageManager.set.mockImplementation((key: string, value: string) => {
+      if (key === 'email') mockStorageManager.get.mockImplementation((k: string) => (k === 'email' ? value : undefined));
+    });
+    mockSyncEngine.hasAnyRemoteData.mockResolvedValue(true);
+    mockSyncEngine.restore.mockResolvedValue({
+      success: true,
+      restoredKeys: ['settings'],
+      failedKeys: [],
+      integrityFailures: [],
+    });
+    mockSyncEngine.hydrate.mockImplementation(async () => {
+      capturedInternalConfig?.eventCallbacks?.onHydrationComplete?.({
+        success: false,
+        restoredKeys: [],
+        failedKeys: [],
+        integrityFailures: [],
+        timestamp: new Date(),
+      });
+      throw new Error('hydrate failed');
+    });
+    mockSyncEngine.start.mockImplementation(() => {
+      void mockSyncEngine.hydrate().catch(() => {});
+    });
+
+    void ganon.login('u1');
+    await expect(ganon.whenHydrated()).resolves.toBe('hydrated');
+  });
+
   it('login with restore completes under earlyWriteGuard throw (internal restore bypasses public set)', async () => {
     const ganon = createGanon({ autoStartSync: true, earlyWriteGuard: 'throw' });
     mockSyncEngine.hasAnyRemoteData.mockResolvedValue(true);
