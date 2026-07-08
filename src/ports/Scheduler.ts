@@ -17,6 +17,7 @@ export class SystemScheduler implements Scheduler {
 
   repeat(fn: () => void, ms: number): CancelHandle {
     const id = setInterval(fn, ms);
+    // Node-only: don't hold test processes open; no-op in RN where setInterval returns a number.
     if (typeof id === 'object' && id !== null && 'unref' in id && typeof id.unref === 'function') {
       id.unref();
     }
