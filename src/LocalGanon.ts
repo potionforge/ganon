@@ -49,6 +49,29 @@ export default class LocalGanon<T extends Record<string, any> & BaseStorageMappi
     return this.storageManager.get(key);
   }
 
+  getOrDefault<K extends keyof T>(key: K, fallback: T[K]): T[K] {
+    const value = this.get(key);
+    return value !== undefined ? value : fallback;
+  }
+
+  isUserLoggedIn(): boolean {
+    return false;
+  }
+
+  async login(_userId: string): Promise<'noop' | 'restore' | 'backup'> {
+    Log.warn('LocalGanon: login() called but LocalGanon does not support cloud synchronization');
+    return 'noop';
+  }
+
+  async logout(_options?: { backup?: boolean }): Promise<void> {
+    Log.warn('LocalGanon: logout() called but LocalGanon does not support cloud synchronization');
+    this.clearAllData();
+  }
+
+  whenHydrated(): Promise<void> {
+    return Promise.resolve();
+  }
+
   /**
    * Sets a value in storage for a given key.
    * @param key - The key to set the value for.

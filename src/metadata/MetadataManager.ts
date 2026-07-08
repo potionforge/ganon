@@ -1,5 +1,7 @@
 import { GanonConfig } from "../models/config/GanonConfig";
+import { CloudBackupConfig } from "../models/config/CloudBackupConfig";
 import LocalMetadataManager from "./local/LocalMetadataManager";
+import MetadataStore from "./local/MetadataStore";
 import { BaseStorageMapping } from "../models/storage/BaseStorageMapping";
 import LocalSyncMetadata from "../models/sync/LocalSyncMetadata";
 import { SyncMetadata } from "../models/sync/SyncMetadata";
@@ -7,20 +9,43 @@ import { SyncStatus } from "../models/sync/SyncStatus";
 import MetadataCoordinatorRepo from "./MetadataCoordinatorRepo";
 import MetadataCoordinator from "./remote/MetadataCoordinator";
 import Log from "../utils/Log";
+import KeyRouter from "../routing/KeyRouter";
 
 export default class MetadataManager<T extends BaseStorageMapping> {
-  private keyToDocumentMap: Map<string, string> = new Map();
-
   constructor(
     private config: GanonConfig<T>,
     private coordinatorRepo: MetadataCoordinatorRepo<T>,
-    private localMetadata: LocalMetadataManager<T>
+    private metadataStore: MetadataStore<T>,
+    keyRouter?: KeyRouter<T>
   ) {
-    this._buildKeyToDocumentMap();
+    this.keyRouter = keyRouter ?? new KeyRouter(config.cloudConfig ?? ({} as CloudBackupConfig<T>));
   }
 
+  private keyRouter: KeyRouter<T>;
+  private lastRemoteSnapshot: Record<string, { d: string; v: number }> = {};
+
   get(key: Extract<keyof T, string>): LocalSyncMetadata | undefined {
-    return this.localMetadata.get(key);
+    return this.metadataStore.get(key);
+  }
+
+  isNeverSynced(key: Extract<keyof T, string>): boolean {
+    return this.metadataStore.isNeverSynced(key);
+  }
+
+  async recordLocalChange(key: Extract<keyof T, string>, metadata: LocalSyncMetadata): Promise<void> {
+    const coordinator = this._getCoordinator(key);
+    if (!coordinator) return;
+    await coordinator.recordLocalChange(key, metadata);
+  }
+
+  async persistLocalChange(key: Extract<keyof T, string>, metadata: LocalSyncMetadata): Promise<void> {
+    this.metadataStore.recordLocalChange(key, metadata);
+  }
+
+  async recordSyncedState(key: Extract<keyof T, string>, metadata: LocalSyncMetadata): Promise<void> {
+    const coordinator = this._getCoordinator(key);
+    if (!coordinator) return;
+    await coordinator.recordSyncedState(key, metadata);
   }
 
   updateSyncStatus(key: Extract<keyof T, string>, status: SyncStatus): void {
@@ -34,22 +59,29 @@ export default class MetadataManager<T extends BaseStorageMapping> {
 
   async hydrateMetadata(): Promise<void> {
     Log.info('Ganon: MetadataManager.hydrateMetadata');
-    if (!this.config?.cloudConfig) {
-      return;
-    }
+    if (!this.config?.cloudConfig) return;
+
+    // Keep documentName paired with its coordinator so aggregated failure reporting
+    // cannot misalign, while preserving beta-7's lazy-invalidate + refresh flow.
     const documentNames = Object.keys(this.config.cloudConfig);
+    const entries = documentNames
+      .map(documentName => ({
+        documentName,
+        coordinator: this.coordinatorRepo.getCoordinator(documentName as Extract<keyof T, string>),
+      }))
+      .filter(entry => Boolean(entry.coordinator));
+
+    // One fetch per document: lazy invalidate then refresh
+    entries.forEach(entry => entry.coordinator.invalidateCache());
+
+    // allSettled (not Promise.all) so a permission-denied on one backup document surfaces
+    // every failure in a single aggregated error instead of masking the rest (Ticket B diagnostics).
     const results = await Promise.allSettled(
-      documentNames.map(async (documentName) => {
-        const coordinator = this.coordinatorRepo.getCoordinator(documentName as Extract<keyof T, string>);
-        if (!coordinator) {
-          return;
-        }
-        await coordinator.invalidateCache();
-      })
+      entries.map(entry => entry.coordinator.refreshCache())
     );
 
     const failures = results
-      .map((result, index) => ({ result, documentName: documentNames[index] }))
+      .map((result, index) => ({ result, documentName: entries[index].documentName }))
       .filter((entry): entry is { result: PromiseRejectedResult; documentName: string } => entry.result.status === 'rejected');
 
     if (failures.length > 0) {
@@ -61,29 +93,26 @@ export default class MetadataManager<T extends BaseStorageMapping> {
         .join(' | ');
       throw new Error(`Metadata hydrate failed for backup document(s): ${details}`);
     }
+
+    this.lastRemoteSnapshot = {};
+    for (const entry of entries) {
+      Object.assign(this.lastRemoteSnapshot, entry.coordinator.getCachedRemote());
+    }
   }
 
-  async set(key: Extract<keyof T, string>, metadata: LocalSyncMetadata, scheduleRemoteSync: boolean = true): Promise<void> {
-    Log.verbose(`Ganon: MetadataManager.set, key: ${String(key)}, metadata: ${JSON.stringify(metadata)}, scheduleRemoteSync: ${scheduleRemoteSync}`);
-    const coordinator = this._getCoordinator(key);
-    if (!coordinator) {
-      Log.warn(`Cannot set metadata for key ${key}: no coordinator found`);
-      return;
-    }
-    await coordinator.updateLocalMetadata(key, metadata, scheduleRemoteSync);
+  /** Remote metadata from the most recent hydrateMetadata() pass — no additional fetch. */
+  getRemoteMetaForKey(key: Extract<keyof T, string>): { d: string; v: number } | undefined {
+    return this.lastRemoteSnapshot[String(key)];
+  }
+
+  async set(key: Extract<keyof T, string>, metadata: LocalSyncMetadata): Promise<void> {
+    await this.recordLocalChange(key, metadata);
   }
 
   async needsHydration(key: Extract<keyof T, string>): Promise<boolean> {
     Log.verbose(`Ganon: MetadataManager.needsHydration, key: ${String(key)}`);
     const coordinator = this._getCoordinator(key);
-    if (!coordinator) {
-      Log.warn(`Cannot check hydration for key ${key}: no coordinator found`);
-      return false;
-    }
-
-    // Force cache invalidation for hydration to ensure fresh remote metadata
-    await this.invalidateCacheForHydration(key);
-
+    if (!coordinator) return false;
     return coordinator.needsHydration(key);
   }
 
@@ -127,30 +156,15 @@ export default class MetadataManager<T extends BaseStorageMapping> {
    * Force cache invalidation for hydration operations to ensure fresh remote metadata.
    * This ensures we're comparing against the most current remote data.
    */
-  async invalidateCacheForHydration(key: Extract<keyof T, string>): Promise<void> {
-    Log.verbose(`Ganon: MetadataManager.invalidateCacheForHydration, key: ${String(key)}`);
-    const coordinator = this._getCoordinator(key);
-    if (!coordinator) {
-      Log.warn(`Cannot invalidate cache for key ${key}: no coordinator found`);
-      return;
-    }
-
-    try {
-      await coordinator.invalidateCache();
-    } catch (error) {
-      Log.error(`Failed to invalidate cache for hydration for key ${key}: ${error}`);
-      // Don't re-throw the error to maintain graceful degradation
-    }
+  async invalidateCacheForHydration(_key: Extract<keyof T, string>): Promise<void> {
+    // Hydration pass refreshes per-document cache in hydrateMetadata(); no per-key fetch.
   }
 
   async invalidateCache(key: Extract<keyof T, string>): Promise<void> {
     Log.verbose(`Ganon: MetadataManager.invalidateCache, key: ${String(key)}`);
     const coordinator = this._getCoordinator(key);
-    if (!coordinator) {
-      Log.warn(`Cannot invalidate cache for key ${key}: no coordinator found`);
-      return;
-    }
-    await coordinator.invalidateCache();
+    if (!coordinator) return;
+    coordinator.invalidateCache();
   }
 
   /**
@@ -161,10 +175,10 @@ export default class MetadataManager<T extends BaseStorageMapping> {
   cancelPendingOperations(): void {
     Log.verbose('Ganon: MetadataManager.cancelPendingOperations');
 
-    // Local digests live in an in-memory map that clearAllData() does not touch.
+    // Local digests live in the metadata store that clearAllData() does not touch.
     // Without this, logout/delete leaves orphan digests that spawn delete ops on
     // the next login's backup arm while the process is still alive.
-    this.localMetadata.clear();
+    this.metadataStore.clear();
 
     if (!this.config?.cloudConfig) {
       return;
@@ -202,43 +216,7 @@ export default class MetadataManager<T extends BaseStorageMapping> {
     }
   }
 
-  private _buildKeyToDocumentMap(): void {
-    if (!this.config?.cloudConfig) {
-      Log.warn('Ganon: MetadataManager._buildKeyToDocumentMap, no cloudConfig found');
-      return;
-    }
-
-    // Clear the map before rebuilding
-    this.keyToDocumentMap.clear();
-
-    // Process each document in the cloudConfig
-    Object.entries(this.config.cloudConfig).forEach(([documentName, config]) => {
-
-      // Process docKeys if they exist
-      if (config.docKeys && Array.isArray(config.docKeys)) {
-        config.docKeys.forEach(key => {
-          if (typeof key === 'string' && key) {
-            this.keyToDocumentMap.set(key, documentName);
-          } else {
-            Log.warn(`Ganon: MetadataManager._buildKeyToDocumentMap, invalid docKey in ${documentName}: ${key}`);
-          }
-        });
-      }
-
-      // Process subcollectionKeys if they exist
-      if (config.subcollectionKeys && Array.isArray(config.subcollectionKeys)) {
-        config.subcollectionKeys.forEach(key => {
-          if (typeof key === 'string' && key) {
-            this.keyToDocumentMap.set(key, documentName);
-          } else {
-            Log.warn(`Ganon: MetadataManager._buildKeyToDocumentMap, invalid subcollectionKey in ${documentName}: ${key}`);
-          }
-        });
-      }
-    });
-  }
-
   private _router(key: Extract<keyof T, string>): string | undefined {
-    return this.keyToDocumentMap.get(key);
+    return this.keyRouter.route(key)?.document;
   }
 }

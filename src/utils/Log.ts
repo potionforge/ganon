@@ -50,4 +50,9 @@ export default class Log {
   public static enableTestLogs(): void {
     this._loglevel = LogLevel.VERBOSE;
   }
+
+  /** Reset log level to default (for test isolation). */
+  public static reset(): void {
+    this._loglevel = LogLevel.NONE;
+  }
 }

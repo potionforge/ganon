@@ -5,26 +5,13 @@ import { BaseStorageMapping } from '../../models/storage/BaseStorageMapping';
 import ISyncOperation from '../../models/interfaces/ISyncOperation';
 import SyncOperationResult from '../../models/sync/SyncOperationResult';
 import { BATCH_SIZE } from '../../constants';
-import { MMKV } from 'react-native-mmkv';
 import StorageManager from '../../managers/StorageManager';
 import FirestoreManager from '../../firestore/FirestoreManager';
 import MetadataManager from '../../metadata/MetadataManager';
 import SetOperation from '../../sync/operations/SetOperation';
 import DeleteOperation from '../../sync/operations/DeleteOperation';
+import { MMKVFaker } from '../../utils/MMKVFaker';
 import Log from '../../utils/Log';
-
-// Mock MMKV
-jest.mock('react-native-mmkv', () => {
-  const mockStorage = new Map<string, string>();
-  return {
-    MMKV: jest.fn().mockImplementation(() => ({
-      set: jest.fn((key: string, value: string) => mockStorage.set(key, value)),
-      getString: jest.fn((key: string) => mockStorage.get(key)),
-      delete: jest.fn((key: string) => mockStorage.delete(key)),
-      clearAll: jest.fn(() => mockStorage.clear()),
-    })),
-  };
-});
 
 // Mock NetworkMonitor
 jest.mock('../../utils/NetworkMonitor');
@@ -86,12 +73,15 @@ const mockDeps = {
   } as unknown as StorageManager<TestStorageMapping>,
   firestore: {
     runTransaction: jest.fn(async (fn: any) => fn({})),
+    syncValueWithDigest: jest.fn(async () => undefined),
     backup: jest.fn(),
     delete: jest.fn(),
   } as unknown as FirestoreManager<TestStorageMapping>,
   metadataManager: {
     updateSyncStatus: jest.fn(),
     set: jest.fn(),
+    recordLocalChange: jest.fn(),
+    recordSyncedState: jest.fn(),
     get: jest.fn(),
     remove: jest.fn(),
   } as unknown as MetadataManager<TestStorageMapping>,
@@ -102,15 +92,13 @@ describe('OperationRepo', () => {
   let mockNetworkMonitor: jest.Mocked<NetworkMonitor>;
   let mockOperation1: MockOperation<TestStorageMapping>;
   let mockOperation2: MockOperation<TestStorageMapping>;
-  let mockStorage: MMKV;
+  let mockStorage: MMKVFaker;
 
   beforeEach(() => {
     // Reset all mocks
     jest.clearAllMocks();
 
-    // Clear storage before each test
-    const storage = new MMKV({ id: 'ganon_operations' });
-    storage.clearAll();
+    mockStorage = new MMKVFaker();
 
     // Setup NetworkMonitor mock
     mockNetworkMonitor = new NetworkMonitor() as jest.Mocked<NetworkMonitor>;
@@ -130,8 +118,7 @@ describe('OperationRepo', () => {
     });
 
     // Create a new instance for each test to ensure clean state
-    operationRepo = new OperationRepo<TestStorageMapping>(mockNetworkMonitor, mockDeps);
-    mockStorage = (operationRepo as any)._storage;
+    operationRepo = new OperationRepo<TestStorageMapping>(mockNetworkMonitor, mockDeps, mockStorage);
   });
 
   describe('addOperation', () => {
@@ -281,7 +268,7 @@ describe('OperationRepo', () => {
 
       expect(mockStorage.getString('ganon_pending_operations')).toBeUndefined();
 
-      const reloadedRepo = new OperationRepo<TestStorageMapping>(mockNetworkMonitor, mockDeps);
+      const reloadedRepo = new OperationRepo<TestStorageMapping>(mockNetworkMonitor, mockDeps, mockStorage);
       const reloadResults = await reloadedRepo.processOperations();
       expect(reloadResults).toHaveLength(0);
     });
@@ -362,7 +349,7 @@ describe('OperationRepo', () => {
       ]));
 
       // Create a new instance to test initialization
-      const newRepo = new OperationRepo<TestStorageMapping>(mockNetworkMonitor, mockDeps);
+      const newRepo = new OperationRepo<TestStorageMapping>(mockNetworkMonitor, mockDeps, mockStorage);
       
       // Process operations to verify they were added
       const results = await newRepo.processOperations();
@@ -397,7 +384,7 @@ describe('OperationRepo', () => {
       ]));
 
       // Create a new instance to test initialization
-      const newRepo = new OperationRepo<TestStorageMapping>(mockNetworkMonitor, mockDeps);
+      const newRepo = new OperationRepo<TestStorageMapping>(mockNetworkMonitor, mockDeps, mockStorage);
       
       // Verify retry counts are preserved
       const op1 = newRepo['_pendingOperations'].get('testKey1');
@@ -438,7 +425,7 @@ describe('OperationRepo', () => {
       ]));
 
       // Create a new instance to test initialization
-      const newRepo = new OperationRepo<TestStorageMapping>(mockNetworkMonitor, mockDeps);
+      const newRepo = new OperationRepo<TestStorageMapping>(mockNetworkMonitor, mockDeps, mockStorage);
       
       // Create operations with execute method spied on
       const failingOp1 = new MockOperation<TestStorageMapping>('testKey1', {
@@ -528,7 +515,7 @@ describe('OperationRepo', () => {
       ]));
 
       // Create a new instance to test initialization
-      const newRepo = new OperationRepo<TestStorageMapping>(mockNetworkMonitor, mockDeps);
+      const newRepo = new OperationRepo<TestStorageMapping>(mockNetworkMonitor, mockDeps, mockStorage);
       
       // Get the operation that was loaded
       const loadedOp = newRepo['_pendingOperations'].get('testKey1');
@@ -587,7 +574,7 @@ describe('OperationRepo', () => {
       ]));
 
       // Create a new instance to test initialization
-      const newRepo = new OperationRepo<TestStorageMapping>(mockNetworkMonitor, mockDeps);
+      const newRepo = new OperationRepo<TestStorageMapping>(mockNetworkMonitor, mockDeps, mockStorage);
       
       // Verify all operations are loaded with correct types
       const setOp1 = newRepo['_pendingOperations'].get('testKey1');
@@ -642,7 +629,7 @@ describe('OperationRepo', () => {
       mockStorage.set('ganon_pending_operations', 'invalid json');
 
       // Create a new instance to test initialization
-      const newRepo = new OperationRepo<TestStorageMapping>(mockNetworkMonitor, mockDeps);
+      const newRepo = new OperationRepo<TestStorageMapping>(mockNetworkMonitor, mockDeps, mockStorage);
       
       // Should not throw and should start with empty operations
       const results = await newRepo.processOperations();
@@ -669,7 +656,7 @@ describe('OperationRepo', () => {
       });
 
       // Create new repo to test deserialization
-      const newRepo = new OperationRepo<TestStorageMapping>(mockNetworkMonitor, mockDeps);
+      const newRepo = new OperationRepo<TestStorageMapping>(mockNetworkMonitor, mockDeps, mockStorage);
       const restoredOp = newRepo['_pendingOperations'].get('testKey1');
       expect(restoredOp).toBeInstanceOf(SetOperation);
       expect(restoredOp?.getRetryCount()).toBe(1);
@@ -693,7 +680,7 @@ describe('OperationRepo', () => {
       });
 
       // Create new repo to test deserialization
-      const newRepo = new OperationRepo<TestStorageMapping>(mockNetworkMonitor, mockDeps);
+      const newRepo = new OperationRepo<TestStorageMapping>(mockNetworkMonitor, mockDeps, mockStorage);
       const restoredOp = newRepo['_pendingOperations'].get('testKey1');
       expect(restoredOp).toBeInstanceOf(DeleteOperation);
       expect(restoredOp?.getRetryCount()).toBe(1);
@@ -707,7 +694,7 @@ describe('OperationRepo', () => {
       operationRepo.addOperation('testKey2', deleteOp);
 
       // Create new repo to test deserialization
-      const newRepo = new OperationRepo<TestStorageMapping>(mockNetworkMonitor, mockDeps);
+      const newRepo = new OperationRepo<TestStorageMapping>(mockNetworkMonitor, mockDeps, mockStorage);
       const restoredSetOp = newRepo['_pendingOperations'].get('testKey1');
       const restoredDeleteOp = newRepo['_pendingOperations'].get('testKey2');
 
@@ -716,7 +703,7 @@ describe('OperationRepo', () => {
     });
 
     it('should handle missing dependencies gracefully', () => {
-      const repoWithoutDeps = new OperationRepo<TestStorageMapping>(mockNetworkMonitor);
+      const repoWithoutDeps = new OperationRepo<TestStorageMapping>(mockNetworkMonitor, undefined, mockStorage);
       const setOp = new SetOperation('testKey1', mockDeps.storage, mockDeps.firestore, mockDeps.metadataManager);
       
       // Should not throw when adding operation without deps
@@ -738,7 +725,7 @@ describe('OperationRepo', () => {
       ]));
 
       // Create new repo to test deserialization
-      const newRepo = new OperationRepo<TestStorageMapping>(mockNetworkMonitor, mockDeps);
+      const newRepo = new OperationRepo<TestStorageMapping>(mockNetworkMonitor, mockDeps, mockStorage);
       
       // Should log errors for each invalid operation
       expect(Log.error).toHaveBeenCalledTimes(3);

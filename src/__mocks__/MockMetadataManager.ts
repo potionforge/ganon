@@ -28,6 +28,23 @@ export class MockMetadataManager<T extends BaseStorageMapping> extends MetadataM
     this.metadata.set(String(key), metadata);
   }
 
+  async recordLocalChange(key: Extract<keyof T, string>, metadata: LocalSyncMetadata): Promise<void> {
+    await this.set(key, metadata);
+  }
+
+  async persistLocalChange(key: Extract<keyof T, string>, metadata: LocalSyncMetadata): Promise<void> {
+    await this.set(key, metadata);
+  }
+
+  async recordSyncedState(key: Extract<keyof T, string>, metadata: LocalSyncMetadata): Promise<void> {
+    await this.set(key, metadata);
+  }
+
+  isNeverSynced(key: Extract<keyof T, string>): boolean {
+    const meta = this.get(key);
+    return meta.digest === '';
+  }
+
   updateSyncStatus(key: Extract<keyof T, string>, status: SyncStatus): void {
     const current = this.get(key);
     this.set(key, { ...current, syncStatus: status });
