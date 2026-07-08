@@ -1,6 +1,5 @@
 import { GanonConfig } from "../models/config/GanonConfig";
 import { CloudBackupConfig } from "../models/config/CloudBackupConfig";
-import LocalMetadataManager from "./local/LocalMetadataManager";
 import MetadataStore from "./local/MetadataStore";
 import { BaseStorageMapping } from "../models/storage/BaseStorageMapping";
 import LocalSyncMetadata from "../models/sync/LocalSyncMetadata";

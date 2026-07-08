@@ -27,6 +27,7 @@ const mockStorageManager: any = {
 
 const mockSyncEngine: any = {
   start: jest.fn(),
+  stop: jest.fn(),
   startSyncInterval: jest.fn(),
   stopSyncInterval: jest.fn(),
   cancelPendingOperations: jest.fn(),
@@ -186,7 +187,7 @@ describe('Ganon auth lifecycle', () => {
     await ganon.logout();
     expect(mockSyncEngine.syncAll).toHaveBeenCalled();
     expect(mockSyncEngine.cancelPendingOperations).toHaveBeenCalled();
-    expect(mockSyncEngine.stopSyncInterval).toHaveBeenCalled();
+    expect(mockSyncEngine.stop).toHaveBeenCalled();
     expect(mockStorageManager.clearAllData).toHaveBeenCalled();
   });
 
@@ -195,7 +196,7 @@ describe('Ganon auth lifecycle', () => {
     await ganon.logout({ backup: false });
     expect(mockSyncEngine.syncAll).not.toHaveBeenCalled();
     expect(mockSyncEngine.cancelPendingOperations).toHaveBeenCalled();
-    expect(mockSyncEngine.stopSyncInterval).toHaveBeenCalled();
+    expect(mockSyncEngine.stop).toHaveBeenCalled();
     expect(mockStorageManager.clearAllData).toHaveBeenCalled();
   });
 });
