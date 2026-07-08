@@ -38,6 +38,8 @@ export default class Ganon<T extends Record<string, any> & BaseStorageMapping> i
   private hydrationSettled = true;
   /** Last settle reason for the current cycle; late whenHydrated() reads this when settled. */
   private hydrationSettleReason: HydrationWaitReason = 'hydrated';
+  /** True between stopSync() and the next start; drives resume-after-stop hydration re-arm. */
+  private _syncStopped = false;
   private readonly resolvedConfig: ResolvedGanonConfig<T>;
 
   private readonly _listeners = new Map<
@@ -122,12 +124,15 @@ export default class Ganon<T extends Record<string, any> & BaseStorageMapping> i
    * `whenHydrated()` waiters settle honestly via `onHydrationComplete`.
    */
   startSync(): void {
-    if (
-      this.isUserLoggedIn() &&
-      this.hydrationSettled &&
-      this.hydrationSettleReason === 'stopped'
-    ) {
-      this.hydrationSettled = false;
+    // Resume after a real stopSync(): syncEngine.start() re-fires a hydrate pass because
+    // stop() cleared `running`. Re-arm regardless of the prior settle reason — a completed
+    // pass leaves reason 'hydrated', so keying off the reason would let whenHydrated() return
+    // 'hydrated' while the resumed pass is still running. _beginHydrationCycle() bumps the
+    // cycle and clears hydrationSettled so waiters block until onHydrationComplete settles.
+    const resumingAfterStop = this._syncStopped && this.isUserLoggedIn();
+    this._syncStopped = false;
+    if (resumingAfterStop) {
+      this._beginHydrationCycle();
     }
     this.syncEngine.start();
   }
@@ -147,6 +152,7 @@ export default class Ganon<T extends Record<string, any> & BaseStorageMapping> i
     if (this._isHydrationPending()) {
       this._settleHydrationWaiters('stopped');
     }
+    this._syncStopped = true;
     this.syncEngine.stop();
   }
 
@@ -603,6 +609,9 @@ export default class Ganon<T extends Record<string, any> & BaseStorageMapping> i
   private _beginHydrationCycle(): void {
     this.hydrationCycle += 1;
     this.hydrationSettled = false;
+    // A fresh cycle (login or resume) clears the stopped flag so a stale value left by
+    // logout()'s internal stopSync() can't make a later startSync() re-arm while running.
+    this._syncStopped = false;
   }
 
   private _settleHydrationWaiters(reason: HydrationWaitReason = 'hydrated'): void {
