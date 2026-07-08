@@ -12,7 +12,6 @@ import IFirestoreReferenceManager from '../../models/firestore/IFirestoreReferen
 import { BaseStorageMapping } from '../../models/storage/BaseStorageMapping';
 import IUserManager from '../../models/interfaces/IUserManager';
 import Log from '../../utils/Log';
-import KeyRouter from '../../routing/KeyRouter';
 
 export default class FirestoreReferenceManager<T extends BaseStorageMapping> implements IFirestoreReferenceManager<T> {
   private firestore: FirebaseFirestoreTypes.Module;
@@ -20,14 +19,10 @@ export default class FirestoreReferenceManager<T extends BaseStorageMapping> imp
   constructor(
     public userManager: IUserManager,
     public cloudConfig: CloudBackupConfig<T>,
-    keyRouter?: KeyRouter<T>,
     firestore?: FirebaseFirestoreTypes.Module
   ) {
-    this.keyRouter = keyRouter ?? new KeyRouter(cloudConfig);
     this.firestore = firestore ?? getFirestore();
   }
-
-  private keyRouter: KeyRouter<T>;
 
   /**
    * Gets a reference to the backup collection for the current user
@@ -102,31 +97,62 @@ export default class FirestoreReferenceManager<T extends BaseStorageMapping> imp
    * @returns A reference to the document or subcollection within the backup collection
    */
   getDocumentRefForKey(key: Extract<keyof T, string>): FirebaseFirestoreTypes.DocumentReference {
-    const route = this._requireRoute(key);
-    return this.getDocumentRef(this.getBackupRef(), route.document);
+    return this._processByKey<FirebaseFirestoreTypes.DocumentReference>(
+      key,
+      (_, documentName) => this.getDocumentRef(this.getBackupRef(), documentName),
+      (config, key) => config.docKeys?.includes(key) || config.subcollectionKeys?.includes(key) || false
+    );
   }
 
+  /**
+   * Gets the final reference for a given key, whether it's a document or a subcollection
+   * @param key - The key of the document or subcollection to get
+   * @returns A reference to the document or subcollection within the backup collection
+   */
   getRefForKey(key: Extract<keyof T, string>): GetRefForKeyResult {
-    const route = this._requireRoute(key);
-    const backupRef = this.getBackupRef();
-    const docRef = this.getDocumentRef(backupRef, route.document);
+    return this._processByKey<GetRefForKeyResult>(
+      key,
+      (_, documentName) => {
+        const backupRef = this.getBackupRef();
+        const docRef = this.getDocumentRef(backupRef, documentName);
+        const config = this.cloudConfig[documentName];
 
-    if (route.kind === 'docField') {
-      return { ref: docRef, type: DocumentOrCollection.Document };
-    }
-    return {
-      ref: this.getCollectionRef(docRef, key),
-      type: DocumentOrCollection.Collection,
-    };
+        const isDocument = config.docKeys?.includes(key) || false;
+        const isCollection = config.subcollectionKeys?.includes(key) || false;
+
+        if (isDocument) {
+          return {
+            ref: docRef,
+            type: DocumentOrCollection.Document
+          };
+        } else if (isCollection) {
+          return {
+            ref: this.getCollectionRef(docRef, key),
+            type: DocumentOrCollection.Collection
+          };
+        }
+
+        throw new Error(`Ganon: key ${key} not found in document ${documentName}`);
+      },
+      (config, key) => config.docKeys?.includes(key) || config.subcollectionKeys?.includes(key) || false
+    );
   }
 
   /* P R I V A T E */
 
-  private _requireRoute(key: Extract<keyof T, string>) {
-    const route = this.keyRouter.route(key);
-    if (!route) {
-      throw new Error(`Ganon: key ${key} not found in cloudConfig`);
+  private _processByKey<R>(
+    key: Extract<keyof T, string>,
+    processKey: (
+      key: Extract<keyof T, string>,
+      documentName: string,
+    ) => R,
+    keyMatcher: (config: CloudBackupConfig<T>[keyof CloudBackupConfig<T>], key: Extract<keyof T, string>) => boolean
+  ): R {
+    for (const [documentName, config] of Object.entries(this.cloudConfig)) {
+      if (keyMatcher(config, key)) {
+        return processKey(key, documentName);
+      }
     }
-    return route;
+    throw new Error(`Ganon: key ${key} not found in cloudConfig`);
   }
 }
