@@ -3,6 +3,7 @@ import {
 } from '@react-native-firebase/firestore';
 
 import IFirestoreAdapter from '../models/interfaces/IFirestoreAdapter';
+import { deepMerge } from '../__tests__/utils/deepMerge';
 
 /**
  * A mock implementation of FirestoreAdapter for testing purposes.
@@ -51,7 +52,7 @@ export class MockFirestoreAdapter implements IFirestoreAdapter {
 
     if (options?.merge) {
       const existingData = this.documents.get(path) || {};
-      this.documents.set(path, { ...existingData, ...data });
+      this.documents.set(path, deepMerge(existingData, data));
     } else {
       this.documents.set(path, data);
     }
@@ -65,7 +66,7 @@ export class MockFirestoreAdapter implements IFirestoreAdapter {
   async updateDocument(ref: FirebaseFirestoreTypes.DocumentReference, data: any): Promise<void> {
     const path = ref.path;
     const existingData = this.documents.get(path) || {};
-    this.documents.set(path, { ...existingData, ...data });
+    this.documents.set(path, deepMerge(existingData, data));
   }
 
   /**

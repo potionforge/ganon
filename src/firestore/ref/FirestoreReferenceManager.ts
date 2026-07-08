@@ -14,12 +14,15 @@ import IUserManager from '../../models/interfaces/IUserManager';
 import Log from '../../utils/Log';
 
 export default class FirestoreReferenceManager<T extends BaseStorageMapping> implements IFirestoreReferenceManager<T> {
-  private firestore = getFirestore();
+  private firestore: FirebaseFirestoreTypes.Module;
 
   constructor(
     public userManager: IUserManager,
-    public cloudConfig: CloudBackupConfig<T>
-  ) {}
+    public cloudConfig: CloudBackupConfig<T>,
+    firestore?: FirebaseFirestoreTypes.Module
+  ) {
+    this.firestore = firestore ?? getFirestore();
+  }
 
   /**
    * Gets a reference to the backup collection for the current user
