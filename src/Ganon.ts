@@ -60,7 +60,9 @@ export default class Ganon<T extends Record<string, any> & BaseStorageMapping> i
       ...config,
       eventCallbacks: {
         onHydrationComplete: (result) => {
-          if (this.isUserLoggedIn()) {
+          // Defense-in-depth: engine skips this callback on stale paths today, but guard
+          // aborted results so a future wiring change cannot settle on a torn-down pass.
+          if (this.isUserLoggedIn() && !result.aborted) {
             this._settleHydrationWaiters();
           }
           this._emit("hydrationComplete", result);
@@ -297,13 +299,15 @@ export default class Ganon<T extends Record<string, any> & BaseStorageMapping> i
   async restore(): Promise<RestoreResult> {
     Log.info('Ganon: Restoring all data from the cloud');
     const result = await this.syncEngine.restore();
-    this._emit("restoreComplete", result);
-    Log.info(`✅ Ganon: Restored ${result.restoredKeys.length} keys`);
-    if (result.failedKeys.length > 0) {
-      Log.error(`❌ Ganon: Failed to restore ${result.failedKeys.length} keys: ${result.failedKeys.join(', ')}`);
-    }
-    if (result.integrityFailures.length > 0) {
-      Log.warn(`⚠️ Ganon: ${result.integrityFailures.length} keys had integrity failures: ${result.integrityFailures.map(f => f.key).join(', ')}`);
+    if (!result.aborted) {
+      this._emit("restoreComplete", result);
+      Log.info(`✅ Ganon: Restored ${result.restoredKeys.length} keys`);
+      if (result.failedKeys.length > 0) {
+        Log.error(`❌ Ganon: Failed to restore ${result.failedKeys.length} keys: ${result.failedKeys.join(', ')}`);
+      }
+      if (result.integrityFailures.length > 0) {
+        Log.warn(`⚠️ Ganon: ${result.integrityFailures.length} keys had integrity failures: ${result.integrityFailures.map(f => f.key).join(', ')}`);
+      }
     }
     return result;
   }
@@ -436,7 +440,8 @@ export default class Ganon<T extends Record<string, any> & BaseStorageMapping> i
    * - If the same user is already set locally (app reopen), it is a no-op.
    * - If this is a new login and remote has data, restores from remote.
    * - If this is a new login and remote has no data, backs up local guest state.
-   * Returns the action performed: "noop", "restore" or "backup".
+   * Returns the path taken ("noop", "restore", or "backup"), not whether data was applied;
+   * use `whenHydrated()` for hydration status (e.g. `'stopped'` if teardown interleaved).
    */
   async login(userId: string): Promise<"noop" | "restore" | "backup"> {
     if (this.isDestroyed) {
@@ -463,7 +468,12 @@ export default class Ganon<T extends Record<string, any> & BaseStorageMapping> i
       let result: "restore" | "backup";
       if (probe.status === 'present') {
         Log.info('Ganon: Existing remote data detected on login - restoring');
-        await this.restore();
+        const restoreResult = await this.restore();
+        if (restoreResult.aborted) {
+          // stopSync() mid-login wins: sync stays stopped, 'stopped' settled. Caller
+          // resumes via startSync() — never countermand an interleaved stop here.
+          return "restore";
+        }
         result = "restore";
       } else if (probe.status === 'indeterminate') {
         Log.warn(
@@ -615,6 +625,9 @@ export default class Ganon<T extends Record<string, any> & BaseStorageMapping> i
   }
 
   private _settleHydrationWaiters(reason: HydrationWaitReason = 'hydrated'): void {
+    if (this.hydrationSettled) {
+      return;
+    }
     this.hydrationSettled = true;
     this.hydrationSettleReason = reason;
     const cycle = this.hydrationCycle;

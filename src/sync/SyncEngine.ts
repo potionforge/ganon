@@ -516,10 +516,10 @@ export default class SyncEngine<T extends BaseStorageMapping> implements ISyncEn
 
     await this.metadataManager.hydrateMetadata(session);
     if (session.isStale()) {
-      return this._emptyRestoreResult;
+      return this._abortedRestoreResult;
     }
 
-    return this._processKeys(async (key) => {
+    const result = await this._processKeys(async (key) => {
       if (session.isStale()) {
         return false;
       }
@@ -540,6 +540,13 @@ export default class SyncEngine<T extends BaseStorageMapping> implements ISyncEn
       }
       return false;
     }, "restore");
+
+    // Generation-only (not isStale): logged-out-without-bump surfaces as failed keys,
+    // not a fabricated abort — consistent with restore result-lifecycle semantics.
+    if (!session.isCurrentGeneration()) {
+      return this._abortedRestoreResult;
+    }
+    return result;
   }
 
   /**
@@ -734,7 +741,7 @@ export default class SyncEngine<T extends BaseStorageMapping> implements ISyncEn
       const result = await this.hydrationPromise;
 
       if (!session.isCurrentGeneration()) {
-        return this._emptyRestoreResult;
+        return this._abortedRestoreResult;
       }
 
       this.config.eventCallbacks?.onHydrationComplete?.(result);
@@ -928,7 +935,7 @@ export default class SyncEngine<T extends BaseStorageMapping> implements ISyncEn
       const result = await this.hydrationPromise;
 
       if (!session.isCurrentGeneration()) {
-        return this._emptyRestoreResult;
+        return this._abortedRestoreResult;
       }
 
       this.config.eventCallbacks?.onHydrationComplete?.(result);
@@ -1180,6 +1187,19 @@ export default class SyncEngine<T extends BaseStorageMapping> implements ISyncEn
     Log.verbose('Ganon: SyncEngine._emptyRestoreResult');
     return {
       success: false,
+      timestamp: new Date(),
+      restoredKeys: [],
+      failedKeys: [],
+      integrityFailures: [],
+    };
+  }
+
+  /** Stale-session exit: no keys applied; must not be read as successful hydration. */
+  private get _abortedRestoreResult(): RestoreResult {
+    Log.verbose('Ganon: SyncEngine._abortedRestoreResult');
+    return {
+      success: false,
+      aborted: true,
       timestamp: new Date(),
       restoredKeys: [],
       failedKeys: [],

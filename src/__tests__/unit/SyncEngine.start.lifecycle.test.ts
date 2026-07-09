@@ -332,6 +332,90 @@ describe('SyncEngine start/stop lifecycle', () => {
     expect(firestore.fetch).toHaveBeenCalledTimes(1);
   });
 
+  it('stale in-flight restore returns aborted result instead of empty success', async () => {
+    const scheduler = new FakeScheduler();
+    const storage = createMockStorageManager<TestStorage>();
+    const metadataManager = createMockMetadataManager<TestStorage>();
+    const firestore = createMockFirestoreManager<TestStorage>();
+    const userManager = createMockUserManager<TestStorage>();
+    userManager.isUserLoggedIn.mockReturnValue(true);
+
+    let releaseFetch!: (value: string) => void;
+    const fetchGate = new Promise<string>(resolve => {
+      releaseFetch = resolve;
+    });
+
+    const remoteValue = 'stale-restore-value';
+
+    metadataManager.hydrateMetadata.mockResolvedValue(undefined);
+    firestore.fetch.mockImplementation(() => fetchGate);
+
+    const engine = createEngine(
+      scheduler,
+      { autoStartSync: false },
+      { storage, metadataManager, firestore, userManager }
+    );
+
+    const restorePromise = engine.restore();
+    await Promise.resolve();
+
+    engine.stop();
+
+    releaseFetch(remoteValue);
+    const result = await restorePromise;
+
+    expect(result.aborted).toBe(true);
+    expect(result.success).toBe(false);
+    expect(result.restoredKeys).toEqual([]);
+  });
+
+  it('stale in-flight hydrate returns aborted result', async () => {
+    const scheduler = new FakeScheduler();
+    const storage = createMockStorageManager<TestStorage>();
+    const metadataManager = createMockMetadataManager<TestStorage>();
+    const firestore = createMockFirestoreManager<TestStorage>();
+    const userManager = createMockUserManager<TestStorage>();
+    userManager.isUserLoggedIn.mockReturnValue(true);
+
+    let releaseFetch!: (value: string) => void;
+    const fetchGate = new Promise<string>(resolve => {
+      releaseFetch = resolve;
+    });
+
+    const remoteValue = 'stale-remote-value';
+    const remoteDigest = computeHash(remoteValue);
+
+    metadataManager.needsHydration.mockResolvedValue(true);
+    metadataManager.get.mockReturnValue({
+      syncStatus: SyncStatus.Synced,
+      digest: 'local-digest',
+      version: 1,
+    });
+    metadataManager.getRemoteMetadataOnly.mockResolvedValue({
+      digest: remoteDigest,
+      version: 2,
+    });
+    firestore.fetch.mockImplementation(() => fetchGate);
+
+    const engine = createEngine(
+      scheduler,
+      { autoStartSync: false },
+      { storage, metadataManager, firestore, userManager }
+    );
+
+    const hydratePromise = engine.hydrate();
+    await Promise.resolve();
+
+    engine.stop();
+
+    releaseFetch(remoteValue);
+    const result = await hydratePromise;
+
+    expect(result.aborted).toBe(true);
+    expect(result.success).toBe(false);
+    expect(result.restoredKeys).toEqual([]);
+  });
+
   it('stale in-flight forceHydrate cannot recover via integrity failure after stop()', async () => {
     const scheduler = new FakeScheduler();
     const storage = createMockStorageManager<TestStorage>();
