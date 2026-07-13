@@ -73,6 +73,9 @@ export default class Ganon<T extends Record<string, any> & BaseStorageMapping> i
       this.userManager = userManager;
       this.isInitialized = true;
 
+      // Load canary so app logs prove this local build is what Metro resolved.
+      Log.info('Ganon: build canary — local-main-diagnostics-2026-07-13 (path+reason logging)');
+
       // Start sync if autoStartSync is enabled and user is logged in
       if (config.autoStartSync && this.isUserLoggedIn()) {
         this.startSync();

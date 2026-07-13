@@ -84,7 +84,8 @@ export default class SyncController<T extends BaseStorageMapping> implements ISy
           return true;
         }
       } catch (e) {
-        Log.warn(`Ganon: hasAnyRemoteData error checking key ${String(key)}: ${e}`);
+        const reason = e instanceof Error ? e.message : String(e);
+        Log.warn(`Ganon: hasAnyRemoteData error checking key ${String(key)}: ${reason}`);
       }
     }
     return false;
@@ -330,6 +331,19 @@ export default class SyncController<T extends BaseStorageMapping> implements ISy
         .map(result => result.key)
         .filter((key): key is Extract<keyof T, string> => key !== undefined);
 
+      const failedResults = results ? results.filter(result => !result.success) : [];
+      const failedByOp = new Map<string, string>();
+      for (const result of failedResults) {
+        if (!result.key) continue;
+        const reason =
+          result.error instanceof Error
+            ? result.error.message
+            : result.error != null
+              ? String(result.error)
+              : 'unknown operation failure';
+        failedByOp.set(String(result.key), reason);
+      }
+
       // Keys that were marked for sync but failed
       const failedKeys = Array.from(markedForSync).filter(key => !backedUpKeys.includes(key));
 
@@ -337,6 +351,15 @@ export default class SyncController<T extends BaseStorageMapping> implements ISy
       const skippedKeys = allKeys.filter(key => !markedForSync.has(key));
 
       Log.info(`✅ Ganon: syncAll completed for ${backedUpKeys.length} keys - ${failedKeys.length} failed - ${skippedKeys.length} skipped`);
+      if (failedKeys.length > 0) {
+        Log.info(`❌ Ganon: ${failedKeys.length} keys failed to backup: ${failedKeys.join(', ')}`);
+        for (const key of failedKeys) {
+          const reason =
+            failedByOp.get(String(key)) ??
+            'marked for sync but not present in successful processOperations results';
+          Log.error(`❌ Ganon: backup failure detail — ${String(key)}: ${reason}`);
+        }
+      }
 
       if (backedUpKeys.length > 0) {
         this._updateLastBackup();
@@ -854,6 +877,7 @@ export default class SyncController<T extends BaseStorageMapping> implements ISy
     Log.verbose(`Ganon: SyncController._processKeys, operation: ${operation}`);
     const restoredKeys: Extract<keyof T, string>[] = [];
     const failedKeys: Extract<keyof T, string>[] = [];
+    const failureReasons: string[] = [];
     const integrityFailures: IntegrityFailureInfo[] = [];
 
     // Store the per-invocation configs for use in integrity failure and conflict handling
@@ -872,8 +896,10 @@ export default class SyncController<T extends BaseStorageMapping> implements ISy
             restoredKeys.push(key);
           }
         } catch (error) {
-          Log.error(`Ganon: error ${operation}ing key ${key}: ${error}`);
+          const reason = error instanceof Error ? error.message : String(error);
+          Log.error(`Ganon: error ${operation}ing key ${key}: ${reason}`);
           failedKeys.push(key);
+          failureReasons.push(`${String(key)}: ${reason}`);
         }
       });
 
@@ -883,6 +909,9 @@ export default class SyncController<T extends BaseStorageMapping> implements ISy
     Log.info(`✅ Ganon: ${operation}d ${restoredKeys.length} keys`);
     if (failedKeys.length > 0) {
       Log.info(`❌ Ganon: ${failedKeys.length} keys failed to ${operation}: ${failedKeys.join(', ')}`);
+      for (const reason of failureReasons) {
+        Log.error(`❌ Ganon: ${operation} failure detail — ${reason}`);
+      }
     }
     if (integrityFailures.length > 0) {
       Log.info(`⚠️ Ganon: ${integrityFailures.length} keys had integrity failures: ${integrityFailures.map(f => f.key).join(', ')}`);

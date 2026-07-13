@@ -37,12 +37,30 @@ export default class MetadataManager<T extends BaseStorageMapping> {
     if (!this.config?.cloudConfig) {
       return;
     }
-    const coordinators = Object.keys(this.config.cloudConfig)
-      .map(documentName => this.coordinatorRepo.getCoordinator(documentName as Extract<keyof T, string>))
-      .filter(Boolean);
+    const documentNames = Object.keys(this.config.cloudConfig);
+    const results = await Promise.allSettled(
+      documentNames.map(async (documentName) => {
+        const coordinator = this.coordinatorRepo.getCoordinator(documentName as Extract<keyof T, string>);
+        if (!coordinator) {
+          return;
+        }
+        await coordinator.invalidateCache();
+      })
+    );
 
-    // Run in parallel
-    await Promise.all(coordinators.map(coordinator => coordinator.invalidateCache()));
+    const failures = results
+      .map((result, index) => ({ result, documentName: documentNames[index] }))
+      .filter((entry): entry is { result: PromiseRejectedResult; documentName: string } => entry.result.status === 'rejected');
+
+    if (failures.length > 0) {
+      const details = failures
+        .map(({ documentName, result }) => {
+          const reason = result.reason instanceof Error ? result.reason.message : String(result.reason);
+          return `${documentName}: ${reason}`;
+        })
+        .join(' | ');
+      throw new Error(`Metadata hydrate failed for backup document(s): ${details}`);
+    }
   }
 
   async set(key: Extract<keyof T, string>, metadata: LocalSyncMetadata, scheduleRemoteSync: boolean = true): Promise<void> {

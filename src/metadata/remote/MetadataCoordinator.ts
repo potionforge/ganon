@@ -282,8 +282,11 @@ export default class MetadataCoordinator<T extends BaseStorageMapping> {
   }
 
   private async _doFetchRemoteMetadata(specificKeys?: string[]): Promise<void> {
+    let pathLabel = `users/*/backup/${this.documentKey}`;
     try {
-      const doc = await this.adapter.getDocument(this._getDocRef());
+      const docRef = this._getDocRef();
+      pathLabel = docRef.path;
+      const doc = await this.adapter.getDocument(docRef);
 
       if (doc.exists) {
         const remoteMetadata = doc.data()?.[REMOTE_METADATA_KEY] || {};
@@ -303,7 +306,19 @@ export default class MetadataCoordinator<T extends BaseStorageMapping> {
         this.cache.lastFetchTime = Date.now();
       }
     } catch (error) {
-      Log.error(`Ganon: Failed to fetch remote metadata: ${error}`);
+      Log.error(`Ganon: Failed to fetch remote metadata for document "${this.documentKey}" at ${pathLabel}: ${error}`);
+      if (error && typeof error === 'object' && 'code' in error) {
+        const firestoreError = error as { code: string; message: string };
+        if (firestoreError.code === 'permission-denied') {
+          throw new SyncError(
+            `Permission denied for metadata hydrate (doc get at ${pathLabel}) on backup document "${this.documentKey}": ${firestoreError.message}`,
+            SyncErrorType.SyncNetworkError,
+            undefined,
+            undefined,
+            { code: firestoreError.code, cause: error }
+          );
+        }
+      }
       throw error;
     }
   }
