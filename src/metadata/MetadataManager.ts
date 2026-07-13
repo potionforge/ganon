@@ -154,10 +154,18 @@ export default class MetadataManager<T extends BaseStorageMapping> {
   }
 
   /**
-   * Cancel all pending sync operations for user logout
+   * Cancel all pending sync operations for user logout / account switch.
+   * Clears local sync digests from RAM (+ disk) so a same-process re-login cannot
+   * treat prior-account digests as deletion targets (Ticket B).
    */
   cancelPendingOperations(): void {
     Log.verbose('Ganon: MetadataManager.cancelPendingOperations');
+
+    // Local digests live in an in-memory map that clearAllData() does not touch.
+    // Without this, logout/delete leaves orphan digests that spawn delete ops on
+    // the next login's backup arm while the process is still alive.
+    this.localMetadata.clear();
+
     if (!this.config?.cloudConfig) {
       return;
     }

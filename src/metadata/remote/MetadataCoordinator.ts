@@ -397,7 +397,9 @@ export default class MetadataCoordinator<T extends BaseStorageMapping> {
   }
 
   /**
-   * Cancel any pending flushes and clear cache for logout
+   * Cancel any pending flushes and clear cache for logout / user change.
+   * Also drops the cached Firestore docRef so the next session cannot write to a
+   * prior user's backup path.
    */
   cancelPendingOperations(): void {
     Log.verbose('Ganon: RemoteMetadataCacheManager.cancelPendingOperations');
@@ -413,5 +415,8 @@ export default class MetadataCoordinator<T extends BaseStorageMapping> {
     // Reset cache
     this.cache.data = {};
     this.cache.lastFetchTime = 0;
+
+    // Drop path binding to the previous user (Ticket B: RAM/user-lifecycle residue).
+    this.docRef = null;
   }
 }

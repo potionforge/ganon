@@ -23,6 +23,7 @@ import MetadataManager from "../metadata/MetadataManager";
 import computeHash from "../utils/computeHash";
 import UserManager from "../managers/UserManager";
 import { ConflictResolver } from "./ConflictResolver";
+import type { RemoteDataProbeResult } from "../models/sync/RemoteDataProbeResult";
 
 /**
  * Controller responsible for managing synchronization between local storage and Firestore.
@@ -68,27 +69,48 @@ export default class SyncController<T extends BaseStorageMapping> implements ISy
 
   /**
    * Checks if any remote metadata exists for configured keys.
-   * Used to decide whether to restore (existing user) or backup (new user).
+   * Prefer {@link probeRemoteData} at decision points that choose backup vs restore —
+   * this boolean collapses `absent` and `indeterminate` and must not drive backup.
    */
   async hasAnyRemoteData(): Promise<boolean> {
-    Log.verbose('Ganon: SyncController.hasAnyRemoteData');
+    const probe = await this.probeRemoteData();
+    return probe.status === 'present';
+  }
+
+  /**
+   * Probe whether the current user has cloud backup tenure.
+   * Errors are never treated as empty — that false-negative selects the destructive backup arm.
+   */
+  async probeRemoteData(): Promise<RemoteDataProbeResult> {
+    Log.verbose('Ganon: SyncController.probeRemoteData');
     if (!this.userManager.isUserLoggedIn()) {
-      return false;
+      return { status: 'absent' };
     }
 
     const allKeys = this._getAllConfiguredKeys();
+    const errors: string[] = [];
+
     for (const key of allKeys) {
       try {
         const remoteMeta = await this.metadataManager.getRemoteMetadataOnly(key);
         if (remoteMeta) {
-          return true;
+          return { status: 'present' };
         }
       } catch (e) {
         const reason = e instanceof Error ? e.message : String(e);
-        Log.warn(`Ganon: hasAnyRemoteData error checking key ${String(key)}: ${reason}`);
+        Log.warn(`Ganon: probeRemoteData error checking key ${String(key)}: ${reason}`);
+        errors.push(`${String(key)}: ${reason}`);
       }
     }
-    return false;
+
+    if (errors.length > 0) {
+      return {
+        status: 'indeterminate',
+        reason: errors.join(' | '),
+      };
+    }
+
+    return { status: 'absent' };
   }
 
   /**
@@ -311,15 +333,19 @@ export default class SyncController<T extends BaseStorageMapping> implements ISy
 
           // Only mark as pending if hash has changed or no metadata exists
           if (!existingMetadata || existingMetadata.digest !== currentHash) {
-            this.markAsPending(key);
+            // Bypass debounce: syncAll must enqueue ops before processOperations().
+            this._processMarkAsPending(key);
             markedForSync.add(key);
           }
         } else {
+          // No-deletes-in-backup-mode (Ticket B / F3): syncAll never tombstones from
+          // local absence + digest presence. Deletes originate only from explicit
+          // remove()/markAsDeleted by the app — never from a presence diff here.
           const existingMetadata = this.metadataManager.get(key);
-          // Only mark as deleted if metadata exists and has a valid digest
           if (existingMetadata && existingMetadata.digest && existingMetadata.digest !== '') {
-            this.markAsDeleted(key);
-            markedForSync.add(key);
+            Log.info(
+              `Ganon: syncAll skipping delete for absent key ${String(key)} (digest=${existingMetadata.digest}) — no-deletes-in-backup-mode`
+            );
           }
         }
       }
@@ -799,6 +825,13 @@ export default class SyncController<T extends BaseStorageMapping> implements ISy
    */
   cancelPendingOperations(): void {
     Log.verbose('Ganon: SyncController.cancelPendingOperations');
+
+    if (this._markDebounceTimer) {
+      clearTimeout(this._markDebounceTimer);
+      this._markDebounceTimer = null;
+    }
+    this._pendingMarkKeys.clear();
+
     // Cancel pending metadata sync operations
     this.metadataManager.cancelPendingOperations();
 

@@ -32,6 +32,7 @@ const mockSyncController: any = {
   syncAll: jest.fn(),
   restore: jest.fn(),
   hasAnyRemoteData: jest.fn(),
+  probeRemoteData: jest.fn(),
 };
 
 const mockFirestoreManager: any = {};
@@ -85,7 +86,7 @@ describe('Ganon auth lifecycle', () => {
   });
 
   it('login: restores when remote data exists for new login', async () => {
-    mockSyncController.hasAnyRemoteData.mockResolvedValue(true);
+    mockSyncController.probeRemoteData.mockResolvedValue({ status: 'present' });
     mockSyncController.restore.mockResolvedValue({
       success: true,
       restoredKeys: [],
@@ -101,13 +102,31 @@ describe('Ganon auth lifecycle', () => {
   });
 
   it('login: backs up when no remote data exists for new login', async () => {
-    mockSyncController.hasAnyRemoteData.mockResolvedValue(false);
+    mockSyncController.probeRemoteData.mockResolvedValue({ status: 'absent' });
     mockSyncController.syncAll.mockResolvedValue({ success: true });
     const result = await ganon.login('u3@example.com');
     expect(result).toBe('backup');
     expect(mockStorageManager.set).toHaveBeenCalledWith('email', 'u3@example.com');
     expect(mockSyncController.syncAll).toHaveBeenCalled();
     expect(mockSyncController.restore).not.toHaveBeenCalled();
+  });
+
+  it('login: refuses backup and restores when remote probe is indeterminate', async () => {
+    mockSyncController.probeRemoteData.mockResolvedValue({
+      status: 'indeterminate',
+      reason: 'user: permission-denied',
+    });
+    mockSyncController.restore.mockResolvedValue({
+      success: true,
+      restoredKeys: [],
+      failedKeys: [],
+      integrityFailures: [],
+      timestamp: new Date(),
+    });
+    const result = await ganon.login('u-indeterminate@example.com');
+    expect(result).toBe('restore');
+    expect(mockSyncController.restore).toHaveBeenCalled();
+    expect(mockSyncController.syncAll).not.toHaveBeenCalled();
   });
 
   it('login: restarts sync when autoStartSync is enabled and restoring', async () => {
@@ -118,7 +137,7 @@ describe('Ganon auth lifecycle', () => {
     ganon = new Ganon<TestStorage>(configWithAutoSync);
     jest.clearAllMocks();
 
-    mockSyncController.hasAnyRemoteData.mockResolvedValue(true);
+    mockSyncController.probeRemoteData.mockResolvedValue({ status: 'present' });
     mockSyncController.restore.mockResolvedValue({
       success: true,
       restoredKeys: [],
@@ -140,7 +159,7 @@ describe('Ganon auth lifecycle', () => {
     ganon = new Ganon<TestStorage>(configWithAutoSync);
     jest.clearAllMocks();
 
-    mockSyncController.hasAnyRemoteData.mockResolvedValue(false);
+    mockSyncController.probeRemoteData.mockResolvedValue({ status: 'absent' });
     mockSyncController.syncAll.mockResolvedValue({ success: true });
     const result = await ganon.login('u5@example.com');
     expect(result).toBe('backup');
@@ -149,7 +168,7 @@ describe('Ganon auth lifecycle', () => {
   });
 
   it('login: does not restart sync when autoStartSync is disabled', async () => {
-    mockSyncController.hasAnyRemoteData.mockResolvedValue(false);
+    mockSyncController.probeRemoteData.mockResolvedValue({ status: 'absent' });
     mockSyncController.syncAll.mockResolvedValue({ success: true });
     const result = await ganon.login('u6@example.com');
     expect(result).toBe('backup');

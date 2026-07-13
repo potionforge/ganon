@@ -74,7 +74,7 @@ export default class Ganon<T extends Record<string, any> & BaseStorageMapping> i
       this.isInitialized = true;
 
       // Load canary so app logs prove this local build is what Metro resolved.
-      Log.info('Ganon: build canary — local-main-diagnostics-2026-07-13 (path+reason logging)');
+      Log.info('Ganon: build canary — local-main-ticket-B-2026-07-13 (teardown + no-deletes + probe)');
 
       // Start sync if autoStartSync is enabled and user is logged in
       if (config.autoStartSync && this.isUserLoggedIn()) {
@@ -370,12 +370,19 @@ export default class Ganon<T extends Record<string, any> & BaseStorageMapping> i
     // Set identifier locally to mark user as logged in
     this.storageManager.set(this.config.identifierKey as Extract<keyof T, string>, userId as unknown as T[Extract<keyof T, string>]);
 
-    // Decide whether remote has data
-    const hasRemote = await this.syncController.hasAnyRemoteData();
+    // Decide whether remote has data. Indeterminate must NOT choose backup —
+    // that arm runs syncAll with writes; errors-as-empty was the incident trigger.
+    const probe = await this.syncController.probeRemoteData();
 
     let result: "restore" | "backup";
-    if (hasRemote) {
+    if (probe.status === 'present') {
       Log.info('Ganon: Existing remote data detected on login - restoring');
+      await this.restore();
+      result = "restore";
+    } else if (probe.status === 'indeterminate') {
+      Log.warn(
+        `Ganon: Remote probe indeterminate on login (${probe.reason}); refusing backup, attempting restore`
+      );
       await this.restore();
       result = "restore";
     } else {
