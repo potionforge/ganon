@@ -51,6 +51,7 @@ const mockSyncEngine: any = {
     integrityFailures: [],
   }),
   hasAnyRemoteData: jest.fn(),
+  probeRemoteData: jest.fn(),
 };
 
 const mockUserManager: any = {
@@ -87,6 +88,7 @@ describe('Ganon whenHydrated lifecycle', () => {
     mockUserManager.isUserLoggedIn.mockReturnValue(false);
     mockStorageManager.get.mockReturnValue(undefined);
     mockSyncEngine.hasAnyRemoteData.mockResolvedValue(true);
+    mockSyncEngine.probeRemoteData.mockResolvedValue({ status: 'present' });
   });
 
   function createGanon(overrides: Partial<GanonConfig<TestStorage>> = {}): Ganon<TestStorage> {
