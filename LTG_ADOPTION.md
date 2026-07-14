@@ -280,6 +280,76 @@ guest/local data mixing on rollback needs product thought.
 
 ---
 
+## Probe & login decision contract (6.1) — **inherited by the v2 / beta-7 line**
+
+The beta-6.1 Ticket B fix reworked how `login()` decides restore-vs-backup and enriched the
+`login()` result. beta-7 inherits this contract; LTG must adopt it verbatim rather than
+re-deriving it. Four invariants:
+
+1. **Absence is never inferred from errors.** `probeRemoteData()` returns a discriminated
+   `present | absent | indeterminate`. A read that *fails* is `indeterminate`, never `absent`.
+   Collapsing errors to "empty" was the original account-wipe trigger.
+2. **`indeterminate` never reaches the destructive arm.** On `indeterminate`, `login()` refuses
+   backup (the arm that runs `syncAll` with writes) and attempts a restore instead. The
+   destructive arm is reachable only on a **confirmed-`absent`** remote.
+3. **`remove()` is the only sanctioned cloud-delete.** `syncAll` will not tombstone a key that is
+   merely absent-locally-with-digest-present (marking-layer invariant). Deletion is a deliberate
+   act with an author: call `ganon.remove(key)`, which enqueues a `DeleteOperation`.
+4. **Migrations that want a *cloud* purge must call `remove()`, not `set(KEY, null)`.**
+   `set(null)` writes a present null value (local + cloud) and never triggers a cloud delete —
+   usually exactly what a cache reset wants. The two existing migrations
+   (`clearCommunityFeedFirstPageMine`, `renameUpvoteCache`) chose `set(null)` **deliberately**:
+   they retire *local* cache keys, not user data, and don't need the cloud copy purged. That is
+   fine and should stay. Reach for `remove()` only when the intent is truly "delete this from the
+   backup."
+
+### `login()` returns `LoginResult`, not a string
+
+```ts
+{
+  action: 'noop' | 'restore' | 'backup';
+  probe: 'present' | 'absent' | 'indeterminate' | 'skipped';
+  restoredKeys: number;
+  restoreFailedKeys: number;
+  probeReason?: string; // only when probe === 'indeterminate'
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `action` | What Ganon did |
+| `probe: 'skipped'` | Same-user reopen; **no probe ran**. Do not fabricate/`present`-treat this. |
+| `probe: 'present' \| 'absent' \| 'indeterminate'` | Probe status that drove the decision |
+| `restoredKeys` | Keys actually pulled; `0` for backup/noop **and** for restore against empty/unreadable remote |
+| `restoreFailedKeys` | Keys that failed during restore; `> 0` with `probe: 'present'` means a **partial** restore (degraded session) |
+| `probeReason?` | Aggregated failure reason when `indeterminate` |
+
+Ganon exposes these **facts** and schedules no deferred re-probes of its own; any policy reacting
+to `indeterminate` (or partial restore) lives in the app. On bump: `tsc --noEmit` in LTG — every
+`result === "backup"` comparison becomes `result.action === "backup"`.
+
+### LTG consumer requirement — guest-sync gap (Ticket A third producer)
+
+Adopting the contract turns the bare `action` read into a `loginResult.action` read and adds one
+policy branch in `LoginManager.onAuthStateChanged`, after the mitigation-#4 backup→restore veto:
+
+- **Trigger:** `action === "restore" && probe === "indeterminate" && restoredKeys === 0` **and**
+  local holds real post-onboarding guest data.
+- **Break the tie with the same discriminator (`readRemoteLastBackup`):**
+  - read succeeds and returns `null` → confirmed fresh account → `ganon.backup()` the stranded
+    guest shell (safe under 6.1: marking layer can't tombstone; only `set`s against an empty remote).
+  - read also fails (double-indeterminate) → **fail closed**: no backup; schedule a bounded,
+    one-shot retry. Guest data isn't lost (it's local); worst case it syncs on the next clean
+    login. Correctness over speed.
+- **Why here, not in Ganon:** `indeterminate` means the cloud might hold a real account we
+  couldn't read; backing a guest shell into it would overwrite real values with guest defaults.
+  Only the app has a second, independent signal (`lastBackup`) to break the tie. See Ticket A.
+
+Also update the stale `hasAnyRemoteData()` wording in the login-retry note above once this
+contract is the live call path (`probeRemoteData` / `LoginResult.probe`).
+
+---
+
 ## Evidence citations (why LTG appears in the proposal)
 
 These patterns are cited in `ARCHITECTURE_PROPOSAL_V2.md` as *consumer-side evidence* for
