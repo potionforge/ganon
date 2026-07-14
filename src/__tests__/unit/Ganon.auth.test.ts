@@ -80,7 +80,9 @@ describe('Ganon auth lifecycle', () => {
     ganon = new Ganon<TestStorage>(config);
     const result = await ganon.login('u@example.com');
 
-    expect(result).toBe('noop');
+    expect(result.action).toBe('noop');
+    expect(result.probe).toBe('present');
+    expect(result.restoredKeys).toBe(0);
     expect(mockSyncController.restore).not.toHaveBeenCalled();
     expect(mockSyncController.syncAll).not.toHaveBeenCalled();
   });
@@ -95,7 +97,8 @@ describe('Ganon auth lifecycle', () => {
       timestamp: new Date(),
     });
     const result = await ganon.login('u2@example.com');
-    expect(result).toBe('restore');
+    expect(result.action).toBe('restore');
+    expect(result.probe).toBe('present');
     expect(mockStorageManager.set).toHaveBeenCalledWith('email', 'u2@example.com');
     expect(mockSyncController.restore).toHaveBeenCalled();
     expect(mockSyncController.syncAll).not.toHaveBeenCalled();
@@ -105,7 +108,9 @@ describe('Ganon auth lifecycle', () => {
     mockSyncController.probeRemoteData.mockResolvedValue({ status: 'absent' });
     mockSyncController.syncAll.mockResolvedValue({ success: true });
     const result = await ganon.login('u3@example.com');
-    expect(result).toBe('backup');
+    expect(result.action).toBe('backup');
+    expect(result.probe).toBe('absent');
+    expect(result.restoredKeys).toBe(0);
     expect(mockStorageManager.set).toHaveBeenCalledWith('email', 'u3@example.com');
     expect(mockSyncController.syncAll).toHaveBeenCalled();
     expect(mockSyncController.restore).not.toHaveBeenCalled();
@@ -124,7 +129,9 @@ describe('Ganon auth lifecycle', () => {
       timestamp: new Date(),
     });
     const result = await ganon.login('u-indeterminate@example.com');
-    expect(result).toBe('restore');
+    expect(result.action).toBe('restore');
+    expect(result.probe).toBe('indeterminate');
+    expect(result.probeReason).toBe('user: permission-denied');
     expect(mockSyncController.restore).toHaveBeenCalled();
     expect(mockSyncController.syncAll).not.toHaveBeenCalled();
   });
@@ -155,8 +162,14 @@ describe('Ganon auth lifecycle', () => {
 
     const result = await ganon.login('u-fresh@example.com');
 
-    expect(result).toBe('restore');
+    expect(result.action).toBe('restore');
     expect(mockSyncController.restore).toHaveBeenCalledTimes(1);
+    // The contract must surface the exact stranded-guest signal for the app:
+    // restore + indeterminate + 0 keys. LoginManager keys its fresh-account
+    // backup branch off precisely this triple.
+    expect(result.probe).toBe('indeterminate');
+    expect(result.restoredKeys).toBe(0);
+    expect(result.probeReason).toBe('user: unavailable');
     // Indeterminate must never select the destructive backup arm...
     expect(mockSyncController.syncAll).not.toHaveBeenCalled();
     // ...and must never wipe the guest's local data.
@@ -197,7 +210,7 @@ describe('Ganon auth lifecycle', () => {
       timestamp: new Date(),
     });
     const result = await ganon.login('u4@example.com');
-    expect(result).toBe('restore');
+    expect(result.action).toBe('restore');
     expect(mockSyncController.restore).toHaveBeenCalled();
     expect(mockSyncController.startSyncInterval).toHaveBeenCalled();
   });
@@ -213,7 +226,7 @@ describe('Ganon auth lifecycle', () => {
     mockSyncController.probeRemoteData.mockResolvedValue({ status: 'absent' });
     mockSyncController.syncAll.mockResolvedValue({ success: true });
     const result = await ganon.login('u5@example.com');
-    expect(result).toBe('backup');
+    expect(result.action).toBe('backup');
     expect(mockSyncController.syncAll).toHaveBeenCalled();
     expect(mockSyncController.startSyncInterval).toHaveBeenCalled();
   });
@@ -222,7 +235,7 @@ describe('Ganon auth lifecycle', () => {
     mockSyncController.probeRemoteData.mockResolvedValue({ status: 'absent' });
     mockSyncController.syncAll.mockResolvedValue({ success: true });
     const result = await ganon.login('u6@example.com');
-    expect(result).toBe('backup');
+    expect(result.action).toBe('backup');
     expect(mockSyncController.syncAll).toHaveBeenCalled();
     expect(mockSyncController.startSyncInterval).not.toHaveBeenCalled();
   });
