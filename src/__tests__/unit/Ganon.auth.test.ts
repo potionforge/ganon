@@ -81,8 +81,10 @@ describe('Ganon auth lifecycle', () => {
     const result = await ganon.login('u@example.com');
 
     expect(result.action).toBe('noop');
-    expect(result.probe).toBe('present');
+    expect(result.probe).toBe('skipped');
     expect(result.restoredKeys).toBe(0);
+    expect(result.restoreFailedKeys).toBe(0);
+    expect(mockSyncController.probeRemoteData).not.toHaveBeenCalled();
     expect(mockSyncController.restore).not.toHaveBeenCalled();
     expect(mockSyncController.syncAll).not.toHaveBeenCalled();
   });
@@ -91,7 +93,7 @@ describe('Ganon auth lifecycle', () => {
     mockSyncController.probeRemoteData.mockResolvedValue({ status: 'present' });
     mockSyncController.restore.mockResolvedValue({
       success: true,
-      restoredKeys: [],
+      restoredKeys: ['key1'],
       failedKeys: [],
       integrityFailures: [],
       timestamp: new Date(),
@@ -99,9 +101,27 @@ describe('Ganon auth lifecycle', () => {
     const result = await ganon.login('u2@example.com');
     expect(result.action).toBe('restore');
     expect(result.probe).toBe('present');
+    expect(result.restoredKeys).toBe(1);
+    expect(result.restoreFailedKeys).toBe(0);
     expect(mockStorageManager.set).toHaveBeenCalledWith('email', 'u2@example.com');
     expect(mockSyncController.restore).toHaveBeenCalled();
     expect(mockSyncController.syncAll).not.toHaveBeenCalled();
+  });
+
+  it('login: surfaces partial restore via restoreFailedKeys on present probe', async () => {
+    mockSyncController.probeRemoteData.mockResolvedValue({ status: 'present' });
+    mockSyncController.restore.mockResolvedValue({
+      success: false,
+      restoredKeys: ['key1'],
+      failedKeys: ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h'],
+      integrityFailures: [],
+      timestamp: new Date(),
+    });
+    const result = await ganon.login('u-partial@example.com');
+    expect(result.action).toBe('restore');
+    expect(result.probe).toBe('present');
+    expect(result.restoredKeys).toBe(1);
+    expect(result.restoreFailedKeys).toBe(8);
   });
 
   it('login: backs up when no remote data exists for new login', async () => {
@@ -111,6 +131,7 @@ describe('Ganon auth lifecycle', () => {
     expect(result.action).toBe('backup');
     expect(result.probe).toBe('absent');
     expect(result.restoredKeys).toBe(0);
+    expect(result.restoreFailedKeys).toBe(0);
     expect(mockStorageManager.set).toHaveBeenCalledWith('email', 'u3@example.com');
     expect(mockSyncController.syncAll).toHaveBeenCalled();
     expect(mockSyncController.restore).not.toHaveBeenCalled();
@@ -132,6 +153,7 @@ describe('Ganon auth lifecycle', () => {
     expect(result.action).toBe('restore');
     expect(result.probe).toBe('indeterminate');
     expect(result.probeReason).toBe('user: permission-denied');
+    expect(result.restoreFailedKeys).toBe(0);
     expect(mockSyncController.restore).toHaveBeenCalled();
     expect(mockSyncController.syncAll).not.toHaveBeenCalled();
   });
@@ -169,6 +191,7 @@ describe('Ganon auth lifecycle', () => {
     // backup branch off precisely this triple.
     expect(result.probe).toBe('indeterminate');
     expect(result.restoredKeys).toBe(0);
+    expect(result.restoreFailedKeys).toBe(0);
     expect(result.probeReason).toBe('user: unavailable');
     // Indeterminate must never select the destructive backup arm...
     expect(mockSyncController.syncAll).not.toHaveBeenCalled();

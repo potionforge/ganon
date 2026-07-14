@@ -370,9 +370,8 @@ export default class Ganon<T extends Record<string, any> & BaseStorageMapping> i
 
     if (current === userId) {
       Log.info('Ganon: login called with same user; treating as app reopen (noop)');
-      // No probe is run for an established session; report 'present' so callers
-      // never mistake a reopen for a fresh-account case.
-      return { action: 'noop', probe: 'present', restoredKeys: 0 };
+      // No probe is run for an established session — report that honestly.
+      return { action: 'noop', probe: 'skipped', restoredKeys: 0, restoreFailedKeys: 0 };
     }
 
     // Set identifier locally to mark user as logged in
@@ -386,7 +385,12 @@ export default class Ganon<T extends Record<string, any> & BaseStorageMapping> i
     if (probe.status === 'present') {
       Log.info('Ganon: Existing remote data detected on login - restoring');
       const restoreResult = await this.restore();
-      result = { action: 'restore', probe: 'present', restoredKeys: restoreResult.restoredKeys.length };
+      result = {
+        action: 'restore',
+        probe: 'present',
+        restoredKeys: restoreResult.restoredKeys.length,
+        restoreFailedKeys: restoreResult.failedKeys.length,
+      };
     } else if (probe.status === 'indeterminate') {
       Log.warn(
         `Ganon: Remote probe indeterminate on login (${probe.reason}); refusing backup, attempting restore`
@@ -396,12 +400,13 @@ export default class Ganon<T extends Record<string, any> & BaseStorageMapping> i
         action: 'restore',
         probe: 'indeterminate',
         restoredKeys: restoreResult.restoredKeys.length,
+        restoreFailedKeys: restoreResult.failedKeys.length,
         probeReason: probe.reason,
       };
     } else {
       Log.info('Ganon: No remote data detected on login - backing up local guest state');
       await this.backup();
-      result = { action: 'backup', probe: 'absent', restoredKeys: 0 };
+      result = { action: 'backup', probe: 'absent', restoredKeys: 0, restoreFailedKeys: 0 };
     }
 
     // Start sync if autoStartSync is enabled (sync was stopped during logout)

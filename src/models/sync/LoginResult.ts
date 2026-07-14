@@ -11,10 +11,11 @@
 export type LoginAction = 'noop' | 'restore' | 'backup';
 
 /**
- * The remote-data probe outcome that drove the login decision.
- * Mirrors {@link RemoteDataProbeResult} status values.
+ * The remote-data probe outcome that drove the login decision, or `skipped`
+ * when no probe ran (app-reopen / same-user `noop`).
+ * Mirrors {@link RemoteDataProbeResult} status values, plus `skipped`.
  */
-export type LoginProbeStatus = 'present' | 'absent' | 'indeterminate';
+export type LoginProbeStatus = 'present' | 'absent' | 'indeterminate' | 'skipped';
 
 export interface LoginResult {
   /** What Ganon did: no-op (same user / app reopen), restored from cloud, or backed up local. */
@@ -25,8 +26,8 @@ export interface LoginResult {
    * - `absent` — cloud is genuinely empty; login backed up local guest state.
    * - `indeterminate` — one or more probe reads failed; login refused the
    *   destructive backup arm and attempted a (possibly empty) restore instead.
-   * For a `noop` login no probe is run; it is reported as `present` so callers
-   * never mistake an established session for a fresh-account case.
+   * - `skipped` — no probe ran (same-user reopen / `noop`). Callers must handle
+   *   this consciously; it is not a fabricated `present`.
    */
   probe: LoginProbeStatus;
   /**
@@ -37,6 +38,12 @@ export interface LoginResult {
    * stranded locally (backed up nowhere) and needs app-side resolution.
    */
   restoredKeys: number;
+  /**
+   * Number of keys that failed during restore. `0` for backup/noop.
+   * A `present` restore with `restoredKeys > 0` and `restoreFailedKeys > 0` is a
+   * partial restore — the session is degraded, not clean.
+   */
+  restoreFailedKeys: number;
   /** Present only when `probe: 'indeterminate'`: the aggregated failure reason. */
   probeReason?: string;
 }

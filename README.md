@@ -193,16 +193,18 @@ Ganon provides a smart `login()` method that automatically handles the login lif
 ```ts
 onAuthStateChanged(async (user) => {
   if (user?.email) {
-    const action = await ganon.login(user.email);
-    console.log(`Login action: ${action}`); // "noop", "restore", or "backup"
+    const result = await ganon.login(user.email);
+    console.log(`Login action: ${result.action}`); // "noop", "restore", or "backup"
+    // result.probe: "present" | "absent" | "indeterminate" | "skipped"
+    // result.restoredKeys / result.restoreFailedKeys: restore quality (0 on backup/noop)
   }
 })
 ```
 
-**Return values:**
-- `"noop"` - Same user already logged in (app reopen scenario)
-- `"restore"` - Existing user detected, restored from remote
-- `"backup"` - New user detected, backed up local guest state
+**`LoginResult`:**
+- `action: "noop"` — Same user already logged in (app reopen); `probe` is `"skipped"` (no probe ran)
+- `action: "restore"` — Restored from remote; check `probe` and `restoreFailedKeys` for quality
+- `action: "backup"` — New user detected, backed up local guest state (`probe: "absent"`)
 
 ### User logout
 
