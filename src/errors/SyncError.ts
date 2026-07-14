@@ -10,15 +10,31 @@ export enum SyncErrorType {
 }
 
 class SyncError extends Error {
+  /**
+   * Optional Firestore / underlying error code (e.g. `permission-denied`).
+   * Preserved so callers that branch on `.code` keep working after wrap.
+   */
+  readonly code?: string;
+
   constructor(
     message: string,
     readonly type: SyncErrorType,
     readonly retryCount?: number,
-    readonly childErrors?: SyncError[]
+    readonly childErrors?: SyncError[],
+    options?: { code?: string; cause?: unknown }
   ) {
     super(message);
 
     Object.setPrototypeOf(this, SyncError.prototype);
+
+    if (options?.code) {
+      this.code = options.code;
+    }
+
+    if (options?.cause !== undefined && 'cause' in Error.prototype) {
+      // Preserve original for diagnostics without losing SyncError shape.
+      (this as Error & { cause?: unknown }).cause = options.cause;
+    }
 
     if (Error.captureStackTrace) {
       Error.captureStackTrace(this, SyncError);

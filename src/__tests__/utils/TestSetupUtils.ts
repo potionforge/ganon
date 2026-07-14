@@ -37,12 +37,12 @@ export function createMockStorageManager<T extends BaseStorageMapping>(): jest.M
  * Creates a mock FirestoreManager with all necessary methods
  */
 export function createMockFirestoreManager<T extends BaseStorageMapping>(): jest.Mocked<FirestoreManager<T>> {
-  return ({
+  const mock = {
     identifierKey: 'mock',
     cloudConfig: {} as any,
     adapter: {} as any,
     backup: jest.fn<
-      (key: Extract<keyof T, string>, value: any, options?: { transaction?: any }) => Promise<void>
+      (key: Extract<keyof T, string>, value: any, options?: { transaction?: any; digest?: string; version?: number }) => Promise<void>
     >().mockResolvedValue(undefined),
     fetch: jest.fn<
       (key: Extract<keyof T, string>) => Promise<any>
@@ -51,6 +51,15 @@ export function createMockFirestoreManager<T extends BaseStorageMapping>(): jest
       (key: Extract<keyof T, string>) => Promise<void>
     >().mockResolvedValue(undefined),
     runTransaction: (jest.fn(<R>(callback: (transaction: any) => Promise<R>) => callback({})) as unknown) as FirestoreManager<T>["runTransaction"],
+    syncValueWithDigest: jest.fn<
+      (key: Extract<keyof T, string>, value: any, digest: string, version: number) => Promise<void>
+    >().mockImplementation(async (key, value, _digest, _version) => {
+      await (mock as any).backup(key, value, { digest: 'mock-digest', version: 1 });
+    }),
+    writeValueWithDigest: jest.fn().mockResolvedValue(undefined),
+    backupLastBackupToUserDocument: jest.fn<
+      (timestamp: number, options?: { transaction?: any }) => Promise<void>
+    >().mockResolvedValue(undefined),
     dangerouslyDelete: jest.fn<() => Promise<void>>().mockResolvedValue(undefined),
     _backupDocumentField: async () => {},
     _backupSubcollection: async () => {},
@@ -58,7 +67,8 @@ export function createMockFirestoreManager<T extends BaseStorageMapping>(): jest
     dataProcessor: {} as any,
     chunkManager: {} as any,
     userManager: {} as any
-  } as unknown) as jest.Mocked<FirestoreManager<T>>;
+  } as unknown as jest.Mocked<FirestoreManager<T>>;
+  return mock;
 }
 
 /**
@@ -73,9 +83,16 @@ export function createMockMetadataManager<T extends BaseStorageMapping>(): jest.
     updateSyncStatus: jest.fn(),
     hydrateMetadata: jest.fn(),
     needsHydration: jest.fn(),
+    getRemoteMetadataOnly: jest.fn(),
+    invalidateCacheForHydration: jest.fn(),
     ensureConsistency: jest.fn(),
     invalidateCache: jest.fn(),
-    cancelPendingOperations: jest.fn()
+    invalidateAllRemoteCaches: jest.fn(),
+    cancelPendingOperations: jest.fn(),
+    recordLocalChange: jest.fn(),
+    persistLocalChange: jest.fn(),
+    recordSyncedState: jest.fn(),
+    isNeverSynced: jest.fn().mockReturnValue(false),
   } as unknown) as jest.Mocked<MetadataManager<T>>;
 }
 

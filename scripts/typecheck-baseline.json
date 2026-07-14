@@ -1,0 +1,4 @@
+{
+  "maxErrors": 50,
+  "note": "Full-project tsc --noEmit error count (src + tests). Ratchet: only decrease via scripts/typecheck-ratchet.mjs."
+}

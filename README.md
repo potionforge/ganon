@@ -146,7 +146,7 @@ export const ganon: Ganon<StorageMapping> = Ganon.init<StorageMapping>(config);
 | `identifierKey` | `string`                | Unique user identifier key for users (e.g. `email`, `uid`) |
 | `cloudConfig`   | `CloudBackupConfig<T>`   | Configuration object for Firestore backups where T is your custom storage mapping.        |
 | `logLevel`   | `LogLevel`   | LogLevel enum        |
-| `autoStartSync` | `boolean` | Whether to automatically start the sync interval on initialization. Default: true |
+| `autoStartSync` | `boolean` | When omitted, defaults to `true` (via `resolveGanonConfig`): starts the sync interval and hydration on init/login, and schedules remote legacy-map metadata flushes on local writes. Set `false` to disable all three. |
 | `syncInterval` | `number` | Interval in milliseconds between automatic sync operations. If not specified, uses default interval |
 | `remoteReadonly` | `boolean` | Whether the remote Firestore should be treated as read-only (backup-only configuration) |
 | `conflictResolutionConfig` | `Partial<ConflictResolutionConfig>` | Optional configuration for handling data conflicts during sync operations |
@@ -203,6 +203,23 @@ onAuthStateChanged(async (user) => {
 - `"noop"` - Same user already logged in (app reopen scenario)
 - `"restore"` - Existing user detected, restored from remote
 - `"backup"` - New user detected, backed up local guest state
+
+#### Guest → login write contract (Q5)
+
+Guest writes (before `login()`) are always local-only and never blocked by hydration guards. After `login()`, `restore()` may overwrite generic cloud keys with remote data — apps that need to preserve guest edits should stash-merge locally before calling `login()` (consumer responsibility).
+
+Use `whenHydrated()` to await the post-login hydration cycle, and `getOrDefault(key, fallback)` for reads that must never persist a default. Configure `earlyWriteGuard: 'warn' | 'throw'` to detect logged-in writes while hydration is still in flight.
+
+> **Ordering note:** `whenHydrated()` resolves when Ganon's hydration settles (restore + optional selective hydrate). Consumer-side post-login work — such as OAuth stash-merge in your login manager — may still run *after* `login()` returns, so values read immediately after `whenHydrated()` can briefly reflect pre-merge profile state. That ordering is intentional: stash-merge is consumer-owned (see Q5 above).
+
+### Consumer safety APIs (v2.5)
+
+| API / config | Purpose |
+|---|---|
+| `getOrDefault(key, fallback)` | Read without persisting synthesized defaults (I1) |
+| `whenHydrated()` | Resolves with `'hydrated'`, `'logged-out'`, or `'login-failed'` when Ganon's hydration cycle settles (consumer post-login merges may not have applied yet) |
+| `earlyWriteGuard` | `'off'` (default), `'warn'`, or `'throw'` for post-login pre-hydration writes |
+| `digestReadMode` | `'dual'` (default): higher-version read across in-document `digestMap` + legacy map; `'v2'`: in-document only; `'legacy'`: legacy map only |
 
 ### User logout
 

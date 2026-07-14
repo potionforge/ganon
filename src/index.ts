@@ -2,6 +2,7 @@ export { default as Ganon } from './Ganon';
 export { default as LocalGanon } from './LocalGanon';
 export type { LocalGanonConfig } from './LocalGanon';
 export type { GanonConfig } from './models/config/GanonConfig';
+export type { DigestReadMode } from './metadata/digest/selectRemoteDigest';
 export type { IntegrityFailureConfig } from './models/config/IntegrityFailureConfig';
 export { IntegrityFailureRecoveryStrategy } from './models/config/IntegrityFailureRecoveryStrategy';
 export { ConflictResolutionStrategy } from './models/config/ConflictResolutionStrategy';
@@ -12,6 +13,8 @@ export type { BaseStorageMapping } from './models/storage/BaseStorageMapping';
 export { SyncStatus } from './models/sync/SyncStatus';
 export type { BackupResult } from './models/sync/BackupResult';
 export type { RestoreResult, IntegrityFailureInfo } from './models/sync/RestoreResult';
+export type { RemoteDataProbeResult } from './models/sync/RemoteDataProbeResult';
+export type { HydrationWaitReason } from './models/sync/HydrationWaitReason';
 export type { IGanon } from './models/interfaces/IGanon';
 export type {
   GanonEventName,

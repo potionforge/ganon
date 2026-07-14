@@ -53,7 +53,11 @@ export class MockCloudManager<T extends BaseStorageMapping> implements ICloudMan
     return `digest_${JSON.stringify(value).length}_${Date.now()}`;
   }
 
-  async backup(key: Extract<keyof T, string>, value: any): Promise<void> {
+  async backup(
+    key: Extract<keyof T, string>,
+    value: any,
+    options: { digest: string; version: number }
+  ): Promise<void> {
     if (!this.isUserLoggedIn()) {
       throw new Error('User must be logged in to perform backup operations');
     }
@@ -71,9 +75,7 @@ export class MockCloudManager<T extends BaseStorageMapping> implements ICloudMan
     this.backupCallCount[keyStr] = (this.backupCallCount[keyStr] || 0) + 1;
 
     this.cloudData[key] = value;
-    // Store digest internally but don't return it
-    const digest = this.generateDigest(value);
-    this.remoteMetadata[keyStr] = { digest, version: Date.now() };
+    this.remoteMetadata[keyStr] = { digest: options.digest, version: options.version };
   }
 
   async fetch(key: Extract<keyof T, string>): Promise<T[typeof key] | undefined> {

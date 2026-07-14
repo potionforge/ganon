@@ -12,4 +12,6 @@ export interface RestoreResult {
   failedKeys: string[];
   integrityFailures: IntegrityFailureInfo[];
   timestamp: Date;
+  /** True when the pass was invalidated mid-flight (e.g. stopSync bumped the session). */
+  aborted?: true;
 }

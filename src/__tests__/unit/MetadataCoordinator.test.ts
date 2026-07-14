@@ -9,6 +9,9 @@ import { REMOTE_METADATA_KEY } from '../../constants';
 import { FirebaseFirestoreTypes } from '@react-native-firebase/firestore';
 import StorageManager from '../../managers/StorageManager';
 import IUserManager from '../../models/interfaces/IUserManager';
+import MetadataStore from '../../metadata/local/MetadataStore';
+import { resolveGanonConfig } from '../../models/config/resolveGanonConfig';
+import { FakeScheduler } from '../utils/FakeScheduler';
 
 // Mock dependencies
 jest.mock('../../firestore/ref/FirestoreReferenceManager');
@@ -63,16 +66,18 @@ describe('MetadataCoordinator Tests', () => {
     } as any);
 
     mockLocalMetadata = new LocalMetadataManager(mockStorage) as jest.Mocked<LocalMetadataManager<TestStorageMapping>>;
+    const metadataStore = mockLocalMetadata as unknown as MetadataStore<TestStorageMapping>;
     mockUserManager = new UserManager('email' as keyof TestStorageMapping, mockStorage) as jest.Mocked<UserManager<TestStorageMapping>>;
     mockUserManager.isUserLoggedIn.mockReturnValue(true);
 
-    // Create coordinator instance
     coordinator = new MetadataCoordinator(
       mockReferenceManager,
       mockAdapter,
-      mockLocalMetadata,
+      metadataStore,
       mockUserManager,
-      'settings' // Using a valid key from TestStorageMapping
+      'settings',
+        resolveGanonConfig({ identifierKey: 'email', cloudConfig: MOCK_CLOUD_BACKUP_CONFIG, legacyMetadataWrites: true }),
+      new FakeScheduler()
     );
   });
 
@@ -90,8 +95,7 @@ describe('MetadataCoordinator Tests', () => {
     });
 
     beforeEach(() => {
-      // Clear pending keys before each test
-      coordinator['cache'].pendingKeys.clear();
+      coordinator.cancelPendingOperations();
     });
 
     it('should not detect conflict for local changes', async () => {
@@ -129,7 +133,7 @@ describe('MetadataCoordinator Tests', () => {
       const remoteMeta = { v: 2, d: 'remote-digest' };
 
       // First get remote metadata to populate cache
-      mockAdapter.getDocument.mockResolvedValueOnce({
+      mockAdapter.getDocument.mockResolvedValue({
         exists: true,
         data: () => ({ [REMOTE_METADATA_KEY]: { [key]: remoteMeta } })
       } as any);
@@ -139,8 +143,7 @@ describe('MetadataCoordinator Tests', () => {
 
       // Act
       await coordinator.getRemoteMetadata(); // First get remote data
-      // Clear pending keys to simulate a fresh sync
-      coordinator['cache'].pendingKeys.clear();
+      coordinator.cancelPendingOperations();
       await coordinator.updateLocalMetadata(key, localMeta); // Then try to update
       await coordinator.syncToRemote();
 
@@ -185,7 +188,7 @@ describe('MetadataCoordinator Tests', () => {
       const remoteMeta2 = { v: 4, d: 'remote-digest-2' };
 
       // First get remote metadata to populate cache
-      mockAdapter.getDocument.mockResolvedValueOnce({
+      mockAdapter.getDocument.mockResolvedValue({
         exists: true,
         data: () => ({
           [REMOTE_METADATA_KEY]: {
@@ -196,14 +199,15 @@ describe('MetadataCoordinator Tests', () => {
       } as any);
 
       // Then try to sync local changes
-      mockLocalMetadata.get
-        .mockReturnValueOnce(localMeta1)
-        .mockReturnValueOnce(localMeta2);
+      mockLocalMetadata.get.mockImplementation((key) => {
+        if (key === key1) return localMeta1;
+        if (key === key2) return localMeta2;
+        return undefined;
+      });
 
       // Act
       await coordinator.getRemoteMetadata(); // First get remote data
-      // Clear pending keys to simulate a fresh sync
-      coordinator['cache'].pendingKeys.clear();
+      coordinator.cancelPendingOperations();
       await coordinator.updateLocalMetadata(key1, localMeta1);
       await coordinator.updateLocalMetadata(key2, localMeta2);
       await coordinator.syncToRemote();
@@ -233,7 +237,7 @@ describe('MetadataCoordinator Tests', () => {
 
       await coordinator.updateLocalMetadata(key, metadata);
 
-      expect(mockLocalMetadata.set).toHaveBeenCalledWith(key, metadata);
+      expect(mockLocalMetadata.recordLocalChange).toHaveBeenCalledWith(key, metadata);
       expect(mockAdapter.setDocument).not.toHaveBeenCalled(); // Should be scheduled, not immediate
     });
 

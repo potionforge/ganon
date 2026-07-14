@@ -63,8 +63,13 @@ describe('SetOperation', () => {
       expect(result.shouldRetry).toBeUndefined();
 
       // Verify transaction was used
-      expect(mockFirestore.runTransaction).toHaveBeenCalledTimes(1);
-      expect(mockFirestore.backup).toHaveBeenCalledWith(testKey, testUser, expect.any(Object));
+      expect(mockFirestore.syncValueWithDigest).toHaveBeenCalledTimes(1);
+      expect(mockFirestore.syncValueWithDigest).toHaveBeenCalledWith(
+        testKey,
+        testUser,
+        expect.any(String),
+        expect.any(Number)
+      );
 
       // Verify metadata was updated
       const metadata = mockMetadataManager.get(testKey);
@@ -87,8 +92,13 @@ describe('SetOperation', () => {
       expect(result.key).toBe(testKey);
 
       // Verify transaction was used
-      expect(mockFirestore.runTransaction).toHaveBeenCalledTimes(1);
-      expect(mockFirestore.backup).toHaveBeenCalledWith(testKey, undefined, expect.any(Object));
+      expect(mockFirestore.syncValueWithDigest).toHaveBeenCalledTimes(1);
+      expect(mockFirestore.syncValueWithDigest).toHaveBeenCalledWith(
+        testKey,
+        undefined,
+        expect.any(String),
+        expect.any(Number)
+      );
 
       // Verify metadata was updated with empty digest for undefined
       const metadata = mockMetadataManager.get(testKey);
@@ -110,8 +120,13 @@ describe('SetOperation', () => {
       expect(result.key).toBe(testKey);
 
       // Verify transaction was used
-      expect(mockFirestore.runTransaction).toHaveBeenCalledTimes(1);
-      expect(mockFirestore.backup).toHaveBeenCalledWith(testKey, null, expect.any(Object));
+      expect(mockFirestore.syncValueWithDigest).toHaveBeenCalledTimes(1);
+      expect(mockFirestore.syncValueWithDigest).toHaveBeenCalledWith(
+        testKey,
+        null,
+        expect.any(String),
+        expect.any(Number)
+      );
 
       // Verify metadata was updated
       const metadata = mockMetadataManager.get(testKey);
@@ -126,7 +141,7 @@ describe('SetOperation', () => {
       const testUser = { id: '123', name: 'Test User', email: 'test@example.com' };
       (mockStorage.get as jest.Mock).mockReturnValue(testUser);
       // Simulate transaction failure
-      ((mockFirestore.runTransaction) as jest.Mock).mockImplementationOnce(async () => {
+      ((mockFirestore.syncValueWithDigest) as jest.Mock).mockImplementationOnce(async () => {
         throw new SyncError('Mock backup failure', SyncErrorType.SyncNetworkError);
       });
 
@@ -143,7 +158,7 @@ describe('SetOperation', () => {
     it('should convert non-SyncError to SyncError', async () => {
       const testUser = { id: '123', name: 'Test User', email: 'test@example.com' };
       (mockStorage.get as jest.Mock).mockReturnValue(testUser);
-      ((mockFirestore.runTransaction) as jest.Mock).mockImplementationOnce(async () => {
+      ((mockFirestore.syncValueWithDigest) as jest.Mock).mockImplementationOnce(async () => {
         throw new Error('Regular error');
       });
 
@@ -162,7 +177,7 @@ describe('SetOperation', () => {
         'Test sync error',
         SyncErrorType.SyncNetworkError
       );
-      ((mockFirestore.runTransaction) as jest.Mock).mockImplementationOnce(async () => {
+      ((mockFirestore.syncValueWithDigest) as jest.Mock).mockImplementationOnce(async () => {
         throw originalSyncError;
       });
 
@@ -185,7 +200,7 @@ describe('SetOperation', () => {
       );
 
       // Mock transaction to throw retryable error
-      ((mockFirestore.runTransaction) as jest.Mock).mockImplementationOnce(async () => {
+      ((mockFirestore.syncValueWithDigest) as jest.Mock).mockImplementationOnce(async () => {
         throw retryableError;
       });
 
@@ -205,7 +220,7 @@ describe('SetOperation', () => {
       );
 
       // Mock transaction to throw non-retryable error
-      ((mockFirestore.runTransaction) as jest.Mock).mockImplementationOnce(async () => {
+      ((mockFirestore.syncValueWithDigest) as jest.Mock).mockImplementationOnce(async () => {
         throw nonRetryableError;
       });
 
@@ -225,7 +240,7 @@ describe('SetOperation', () => {
       );
 
       // Mock transaction to throw validation error
-      ((mockFirestore.runTransaction) as jest.Mock).mockImplementationOnce(async () => {
+      ((mockFirestore.syncValueWithDigest) as jest.Mock).mockImplementationOnce(async () => {
         throw validationError;
       });
 

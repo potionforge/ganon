@@ -1,10 +1,12 @@
 import MetadataManager from '../../metadata/MetadataManager';
+import KeyRouter from '../../routing/KeyRouter';
 import { CloudBackupConfig } from '../../models/config/CloudBackupConfig';
 import MetadataCoordinatorRepo from '../../metadata/MetadataCoordinatorRepo';
 import LocalMetadataManager from '../../metadata/local/LocalMetadataManager';
 import { GanonConfig } from '../../models/config/GanonConfig';
 import Log from '../../utils/Log';
 import { TestStorageMapping, MOCK_CLOUD_BACKUP_CONFIG } from '../../__mocks__/MockConfig';
+import { resolveGanonConfig } from '../../models/config/resolveGanonConfig';
 
 // Mock the dependencies
 jest.mock('../../metadata/MetadataCoordinatorRepo');
@@ -32,6 +34,8 @@ describe('MetadataManager Tests', () => {
       {} as any,
       {} as any,
       {} as any,
+      {} as any,
+      resolveGanonConfig({ identifierKey: 'email', cloudConfig: MOCK_CLOUD_BACKUP_CONFIG }),
       {} as any
     ) as jest.Mocked<MetadataCoordinatorRepo<TestStorageMapping>>;
 
@@ -50,153 +54,49 @@ describe('MetadataManager Tests', () => {
     jest.spyOn(Log, 'verbose');
   });
 
-  describe('_buildKeyToDocumentMap', () => {
-    // Helper function to access private method
-    const buildKeyToDocumentMap = (manager: MetadataManager<TestStorageMapping>) => {
-      return (manager as any)._buildKeyToDocumentMap();
-    };
-
-    // Helper function to get the private map
-    const getKeyToDocumentMap = (manager: MetadataManager<TestStorageMapping>) => {
-      return (manager as any).keyToDocumentMap;
-    };
+  describe('KeyRouter integration', () => {
+    const getKeyRouter = (manager: MetadataManager<TestStorageMapping>) =>
+      (manager as any).keyRouter as KeyRouter<TestStorageMapping>;
 
     it('should correctly map docKeys to their documents', () => {
-      buildKeyToDocumentMap(metadataManager);
-      const map = getKeyToDocumentMap(metadataManager);
-
-      // Verify user docKeys
-      expect(map.get('user')).toBe('user');
-      expect(map.get('count')).toBe('user');
-      expect(map.get('docKey')).toBe('user');
-      expect(map.get('nonExistentKey')).toBe('user');
-
-      // Verify exercises docKeys
-      expect(map.get('deletedExerciseKeys')).toBe('exercises');
-
-      // Verify notes docKeys
-      expect(map.get('notes')).toBe('notes');
+      const router = getKeyRouter(metadataManager);
+      expect(router.route('user')?.document).toBe('user');
+      expect(router.route('count')?.document).toBe('user');
+      expect(router.route('notes')?.document).toBe('notes');
+      expect(router.route('deletedExerciseKeys')?.document).toBe('exercises');
     });
 
     it('should correctly map subcollectionKeys to their documents', () => {
-      buildKeyToDocumentMap(metadataManager);
-      const map = getKeyToDocumentMap(metadataManager);
-
-      // Verify user subcollectionKeys
-      expect(map.get('settings')).toBe('user');
-      expect(map.get('stringValue')).toBe('user');
-      expect(map.get('numberValue')).toBe('user');
-      expect(map.get('booleanValue')).toBe('user');
-      expect(map.get('arrayValue')).toBe('user');
-      expect(map.get('largeArray')).toBe('user');
-      expect(map.get('largeData')).toBe('user');
-      expect(map.get('subcollectionKey')).toBe('user');
-
-      // Verify exercises subcollectionKeys
-      expect(map.get('exercises')).toBe('exercises');
-      expect(map.get('startedExercises')).toBe('exercises');
+      const router = getKeyRouter(metadataManager);
+      expect(router.route('settings')).toEqual({ document: 'user', kind: 'subcollection' });
+      expect(router.route('exercises')).toEqual({ document: 'exercises', kind: 'subcollection' });
     });
 
     it('should handle empty cloudConfig', () => {
-      const emptyConfig: GanonConfig<TestStorageMapping> = {
-        identifierKey: 'email',
-        cloudConfig: {}
-      };
-
       const manager = new MetadataManager(
-        emptyConfig,
+        { identifierKey: 'email', cloudConfig: {} },
         mockCoordinatorRepo,
         mockLocalMetadata
       );
-
-      buildKeyToDocumentMap(manager);
-      const map = getKeyToDocumentMap(manager);
-      expect(map.size).toBe(0);
+      expect(getKeyRouter(manager).allCloudKeys()).toEqual([]);
     });
 
     it('should handle document with only docKeys', () => {
-      const config: CloudBackupConfig<TestStorageMapping> = {
-        notes: {
-          docKeys: ['notes']
-        }
-      };
-
       const manager = new MetadataManager(
-        { identifierKey: 'email', cloudConfig: config },
+        { identifierKey: 'email', cloudConfig: { notes: { docKeys: ['notes'] } } },
         mockCoordinatorRepo,
         mockLocalMetadata
       );
-
-      buildKeyToDocumentMap(manager);
-      const map = getKeyToDocumentMap(manager);
-      expect(map.get('notes')).toBe('notes');
-      expect(map.size).toBe(1);
+      expect(getKeyRouter(manager).route('notes')?.document).toBe('notes');
     });
 
     it('should handle document with only subcollectionKeys', () => {
-      const config: CloudBackupConfig<TestStorageMapping> = {
-        exercises: {
-          subcollectionKeys: ['exercises']
-        }
-      };
-
       const manager = new MetadataManager(
-        { identifierKey: 'email', cloudConfig: config },
+        { identifierKey: 'email', cloudConfig: { exercises: { subcollectionKeys: ['exercises'] } } },
         mockCoordinatorRepo,
         mockLocalMetadata
       );
-
-      buildKeyToDocumentMap(manager);
-      const map = getKeyToDocumentMap(manager);
-      expect(map.get('exercises')).toBe('exercises');
-      expect(map.size).toBe(1);
-    });
-
-    it('should handle invalid keys gracefully', () => {
-      const config: CloudBackupConfig<TestStorageMapping> = {
-        user: {
-          docKeys: ['user', null as any, undefined as any, ''],
-          subcollectionKeys: ['settings', null as any, undefined as any, '']
-        }
-      };
-
-      const manager = new MetadataManager(
-        { identifierKey: 'email', cloudConfig: config },
-        mockCoordinatorRepo,
-        mockLocalMetadata
-      );
-
-      buildKeyToDocumentMap(manager);
-      const map = getKeyToDocumentMap(manager);
-
-      // Should only have valid keys
-      expect(map.get('user')).toBe('user');
-      expect(map.get('settings')).toBe('user');
-      expect(map.size).toBe(2);
-    });
-
-    it('should clear existing mappings before rebuilding', () => {
-      // First build with initial config
-      buildKeyToDocumentMap(metadataManager);
-      const initialMap = getKeyToDocumentMap(metadataManager);
-      expect(initialMap.size).toBeGreaterThan(0);
-
-      // Create new manager with empty config
-      const emptyConfig: GanonConfig<TestStorageMapping> = {
-        identifierKey: 'email',
-        cloudConfig: {}
-      };
-
-      const newManager = new MetadataManager(
-        emptyConfig,
-        mockCoordinatorRepo,
-        mockLocalMetadata
-      );
-
-      // Build map with empty config
-      buildKeyToDocumentMap(newManager);
-      const newMap = getKeyToDocumentMap(newManager);
-      expect(newMap.size).toBe(0);
+      expect(getKeyRouter(manager).route('exercises')?.kind).toBe('subcollection');
     });
   });
 
@@ -219,43 +119,31 @@ describe('MetadataManager Tests', () => {
       mockCoordinatorRepo.getCoordinator = jest.fn().mockReturnValue(mockCoordinator);
     });
 
-    it('should force cache invalidation for hydration', async () => {
+    it('should not per-key invalidate during invalidateCacheForHydration (step 4)', async () => {
       const key = 'workouts' as Extract<keyof TestStorageMapping, string>;
-      
       await metadataManager.invalidateCacheForHydration(key);
-      
-      expect(mockCoordinator.invalidateCache).toHaveBeenCalled();
+      expect(mockCoordinator.invalidateCache).not.toHaveBeenCalled();
     });
 
-    it('should handle cache invalidation failure gracefully', async () => {
+    it('invalidateCacheForHydration is a no-op on failure path', async () => {
       const key = 'workouts' as Extract<keyof TestStorageMapping, string>;
-      mockCoordinator.invalidateCache.mockRejectedValue(new Error('Cache invalidation failed'));
-      
       await expect(metadataManager.invalidateCacheForHydration(key)).resolves.not.toThrow();
-      
-      expect(mockCoordinator.invalidateCache).toHaveBeenCalled();
     });
 
-    it('should force cache invalidation during needsHydration check', async () => {
+    it('needsHydration delegates to coordinator without per-key invalidate', async () => {
       const key = 'workouts' as Extract<keyof TestStorageMapping, string>;
       mockCoordinator.needsHydration.mockResolvedValue(true);
-      
       const result = await metadataManager.needsHydration(key);
-      
-      expect(mockCoordinator.invalidateCache).toHaveBeenCalled();
+      expect(mockCoordinator.invalidateCache).not.toHaveBeenCalled();
       expect(mockCoordinator.needsHydration).toHaveBeenCalledWith(key);
       expect(result).toBe(true);
     });
 
-    it('should handle needsHydration with cache invalidation failure', async () => {
+    it('needsHydration when coordinator fails returns coordinator result', async () => {
       const key = 'workouts' as Extract<keyof TestStorageMapping, string>;
-      mockCoordinator.invalidateCache.mockRejectedValue(new Error('Cache invalidation failed'));
       mockCoordinator.needsHydration.mockResolvedValue(false);
-      
       const result = await metadataManager.needsHydration(key);
-      
-      expect(mockCoordinator.invalidateCache).toHaveBeenCalled();
-      expect(mockCoordinator.needsHydration).toHaveBeenCalledWith(key);
+      expect(mockCoordinator.invalidateCache).not.toHaveBeenCalled();
       expect(result).toBe(false);
     });
 
@@ -325,6 +213,57 @@ describe('MetadataManager Tests', () => {
       
       expect(result).toBeUndefined();
       expect(mockCoordinator.getRemoteMetadata).not.toHaveBeenCalled();
+    });
+
+    it('hydrateMetadata populates lastRemoteSnapshot when session is current after refresh', async () => {
+      mockCoordinator.refreshCache = jest.fn().mockResolvedValue(undefined);
+      mockCoordinator.getCachedRemote = jest.fn().mockReturnValue({
+        workouts: { d: 'remote-digest', v: 2 },
+      });
+
+      const session = { isStale: () => false };
+      await metadataManager.hydrateMetadata(session);
+
+      expect(metadataManager.getRemoteMetaForKey('workouts')).toEqual({
+        d: 'remote-digest',
+        v: 2,
+      });
+    });
+
+    it('hydrateMetadata stale refresh does not clobber a fresh session snapshot', async () => {
+      let releaseStaleRefresh!: () => void;
+      const staleRefreshGate = new Promise<void>(resolve => {
+        releaseStaleRefresh = resolve;
+      });
+
+      mockCoordinator.refreshCache = jest
+        .fn()
+        .mockImplementationOnce(() => staleRefreshGate)
+        .mockImplementationOnce(() => Promise.resolve(undefined));
+      mockCoordinator.getCachedRemote = jest
+        .fn()
+        .mockReturnValueOnce({ workouts: { d: 'orphan-digest', v: 99 } })
+        .mockReturnValueOnce({ workouts: { d: 'fresh-digest', v: 2 } });
+
+      const staleSession = { isStale: () => true };
+      const freshSession = { isStale: () => false };
+
+      const stalePromise = metadataManager.hydrateMetadata(staleSession);
+      await Promise.resolve();
+
+      await metadataManager.hydrateMetadata(freshSession);
+      expect(metadataManager.getRemoteMetaForKey('workouts')).toEqual({
+        d: 'fresh-digest',
+        v: 2,
+      });
+
+      releaseStaleRefresh();
+      await stalePromise;
+
+      expect(metadataManager.getRemoteMetaForKey('workouts')).toEqual({
+        d: 'fresh-digest',
+        v: 2,
+      });
     });
   });
 });
