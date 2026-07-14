@@ -1185,6 +1185,20 @@ describe('SyncController Tests', () => {
       expect(mockStorage.set).toHaveBeenCalledWith('testKey', remoteValue);
     });
 
+    it('restore on an empty remote returns success with nothing restored (real fetch→undefined path)', async () => {
+      // Genuinely-fresh / empty cloud: every key fetch resolves undefined. This is the REAL
+      // restore path that the Ganon-level indeterminate tests mock at the syncController
+      // boundary — it must not throw, must not write, and must report success with 0 keys.
+      mockFirestore.fetch.mockResolvedValue(undefined);
+
+      const result = await syncController.restore();
+
+      expect(result.success).toBe(true);
+      expect(result.restoredKeys).toHaveLength(0);
+      expect(result.failedKeys).toHaveLength(0);
+      expect(mockStorage.set).not.toHaveBeenCalled();
+    });
+
     it('should handle restore failures gracefully', async () => {
       // Setup test data with failure
       mockFirestore.fetch.mockRejectedValue(new Error('Restore failed'));
