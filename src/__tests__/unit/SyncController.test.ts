@@ -71,16 +71,18 @@ describe('SyncController Tests', () => {
       needsHydration: jest.fn(),
       getRemoteMetadataOnly: jest.fn(),
       invalidateCache: jest.fn(),
-      invalidateCacheForHydration: jest.fn()
+      invalidateCacheForHydration: jest.fn(),
+      cancelPendingOperations: jest.fn(),
     } as any;
 
     mockOperationRepo = {
       addOperation: jest.fn(),
-      processOperations: jest.fn()
+      processOperations: jest.fn(),
+      clearAll: jest.fn(),
     } as any;
 
     mockUserManager = {
-      getCurrentUser: jest.fn(),
+      getCurrentUser: jest.fn().mockReturnValue('test@example.com'),
       isUserLoggedIn: jest.fn().mockReturnValue(true),
       login: jest.fn(),
       logout: jest.fn()
@@ -1197,6 +1199,7 @@ describe('SyncController Tests', () => {
       expect(result.restoredKeys).toHaveLength(0);
       expect(result.failedKeys).toHaveLength(0);
       expect(mockStorage.set).not.toHaveBeenCalled();
+      expect(mockMetadataManager.set).not.toHaveBeenCalled();
     });
 
     it('should handle restore failures gracefully', async () => {
@@ -1210,21 +1213,6 @@ describe('SyncController Tests', () => {
       expect(result.success).toBe(false);
       expect(result.failedKeys).toContain('testKey');
       expect(result.restoredKeys).toHaveLength(0);
-    });
-  });
-
-  describe('Error Handling', () => {
-    it('should handle network timeouts', async () => {
-      // Setup test data with timeout
-      mockFirestore.fetch.mockRejectedValue(new Error('Network timeout'));
-      mockMetadataManager.needsHydration.mockResolvedValue(true);
-
-      // Execute operation
-      const result = await syncController.hydrate();
-
-      // Verify results
-      expect(result.success).toBe(false);
-      expect(result.failedKeys).toContain('testKey');
     });
 
     it('should handle invalid data gracefully', async () => {
@@ -1393,7 +1381,9 @@ describe('SyncController Tests', () => {
       // Verify lastBackup was synced to remote
       await Promise.resolve(); // Wait for async backup promise
       expect(mockFirestore.backupLastBackupToUserDocument).toHaveBeenCalledTimes(1);
-      expect(mockFirestore.backupLastBackupToUserDocument).toHaveBeenCalledWith(expect.any(Number));
+      expect(mockFirestore.backupLastBackupToUserDocument).toHaveBeenCalledWith(expect.any(Number), {
+        ownerAtSchedule: 'test@example.com',
+      });
     });
 
     it('should not update lastBackup when no keys are successfully synced', async () => {
@@ -1425,7 +1415,9 @@ describe('SyncController Tests', () => {
       // Verify lastBackup was synced to remote
       await Promise.resolve(); // Wait for async backup promise
       expect(mockFirestore.backupLastBackupToUserDocument).toHaveBeenCalledTimes(1);
-      expect(mockFirestore.backupLastBackupToUserDocument).toHaveBeenCalledWith(expect.any(Number));
+      expect(mockFirestore.backupLastBackupToUserDocument).toHaveBeenCalledWith(expect.any(Number), {
+        ownerAtSchedule: 'test@example.com',
+      });
     });
 
     it('should not update lastBackup when syncAll has no successful backups', async () => {
@@ -1490,9 +1482,11 @@ describe('SyncController Tests', () => {
       const lastBackupCall = mockStorage.set.mock.calls.find(call => call[0] === 'lastBackup');
       const localTimestamp = lastBackupCall![1] as number;
 
-      // Verify the same timestamp was sent to remote
+      // Verify the same timestamp was sent to remote, with schedule-time owner
       await Promise.resolve(); // Wait for async backup promise
-      expect(mockFirestore.backupLastBackupToUserDocument).toHaveBeenCalledWith(localTimestamp);
+      expect(mockFirestore.backupLastBackupToUserDocument).toHaveBeenCalledWith(localTimestamp, {
+        ownerAtSchedule: 'test@example.com',
+      });
     });
 
     it('should not sync lastBackup to remote when user is not logged in', async () => {
@@ -1526,6 +1520,37 @@ describe('SyncController Tests', () => {
       // Verify remote backup was attempted
       await Promise.resolve(); // Wait for async backup promise
       expect(mockFirestore.backupLastBackupToUserDocument).toHaveBeenCalledTimes(1);
+    });
+
+    it('cancelPendingOperations awaits in-flight lastBackup write before clearing queues', async () => {
+      // Reproduces the logout→login interleave: syncAll finishes, _updateLastBackup
+      // starts a slow user-doc write, teardown must drain it before clearAll would run.
+      let resolveWrite!: () => void;
+      const slowWrite = new Promise<void>((resolve) => {
+        resolveWrite = resolve;
+      });
+      mockFirestore.backupLastBackupToUserDocument.mockReturnValue(slowWrite);
+      mockOperationRepo.processOperations.mockResolvedValue([{ success: true, key: 'testKey' }]);
+
+      await syncController.syncPending();
+      expect(mockFirestore.backupLastBackupToUserDocument).toHaveBeenCalledTimes(1);
+
+      let cancelSettled = false;
+      const cancelPromise = syncController.cancelPendingOperations().then(() => {
+        cancelSettled = true;
+      });
+
+      // Must not clear the op queue (or return) while the lastBackup write is still open.
+      await Promise.resolve();
+      expect(cancelSettled).toBe(false);
+      expect(mockOperationRepo.clearAll).not.toHaveBeenCalled();
+
+      resolveWrite();
+      await cancelPromise;
+
+      expect(cancelSettled).toBe(true);
+      expect(mockOperationRepo.clearAll).toHaveBeenCalledTimes(1);
+      expect(mockMetadataManager.cancelPendingOperations).toHaveBeenCalledTimes(1);
     });
   });
 

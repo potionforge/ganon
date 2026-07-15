@@ -39,6 +39,13 @@ export default class SyncController<T extends BaseStorageMapping> implements ISy
   private _markDebounceTimer: NodeJS.Timeout | null = null;
   private readonly _MARK_DEBOUNCE_DELAY = 50; // ms
 
+  /**
+   * In-flight lastBackup → user-doc write. Previously fire-and-forget, which let the
+   * Firestore completion land inside the *next* login's probe window (cross-session
+   * residue). Teardown awaits this before clearAllData.
+   */
+  private _pendingLastBackupSync: Promise<void> | null = null;
+
   // Per-invocation integrity config
   private _currentIntegrityConfig?: Partial<IntegrityFailureConfig>;
 
@@ -821,9 +828,11 @@ export default class SyncController<T extends BaseStorageMapping> implements ISy
   }
 
   /**
-   * Cancel all pending sync operations, typically called on user logout
+   * Cancel all pending sync operations, typically called on user logout.
+   * Drains any in-flight lastBackup user-doc write before clearing queues so that
+   * write cannot complete mid-login of the next account.
    */
-  cancelPendingOperations(): void {
+  async cancelPendingOperations(): Promise<void> {
     Log.verbose('Ganon: SyncController.cancelPendingOperations');
 
     if (this._markDebounceTimer) {
@@ -831,6 +840,18 @@ export default class SyncController<T extends BaseStorageMapping> implements ISy
       this._markDebounceTimer = null;
     }
     this._pendingMarkKeys.clear();
+
+    // Drain lastBackup remote write BEFORE clearing session state. This is the
+    // Ticket-B residual: fire-and-forget completion was interleaving with the next
+    // login's `email` set + probe (same class as poisoned digests escaping teardown).
+    if (this._pendingLastBackupSync) {
+      try {
+        await this._pendingLastBackupSync;
+      } catch {
+        // Errors already logged in _updateLastBackup; never fail logout for this.
+      }
+      this._pendingLastBackupSync = null;
+    }
 
     // Cancel pending metadata sync operations
     this.metadataManager.cancelPendingOperations();
@@ -843,20 +864,35 @@ export default class SyncController<T extends BaseStorageMapping> implements ISy
 
   /**
    * Updates the last backup timestamp in local storage and syncs it to the remote user document.
+   * The remote write is tracked so logout teardown can await it (must not be fire-and-forget
+   * across the session boundary).
    */
   private _updateLastBackup(): void {
     Log.verbose('Ganon: SyncController._updateLastBackup');
     const timestamp = Date.now();
     this.storage.set('lastBackup' as Extract<keyof T, string>, timestamp as T[Extract<keyof T, string>]);
-    
+
     // Automatically sync lastBackup to the user document as a field-level entry
     // This happens automatically without requiring cloudConfig configuration
-    if (this.userManager.isUserLoggedIn()) {
-      this.firestore.backupLastBackupToUserDocument(timestamp).catch(error => {
+    if (!this.userManager.isUserLoggedIn()) {
+      return;
+    }
+
+    // Capture identity at schedule time — the write may run after awaits, so the
+    // FirestoreManager guard must compare against this, not a capture at call entry.
+    const ownerAtSchedule = this.userManager.getCurrentUser();
+
+    const write = this.firestore
+      .backupLastBackupToUserDocument(timestamp, { ownerAtSchedule })
+      .catch((error) => {
         Log.error(`Ganon: Failed to sync lastBackup to remote: ${error}`);
         // Don't throw - we don't want lastBackup sync failures to break the main sync flow
       });
-    }
+
+    // Chain so concurrent _updateLastBackup calls still drain in order on teardown
+    this._pendingLastBackupSync = (this._pendingLastBackupSync ?? Promise.resolve())
+      .then(() => write)
+      .then(() => undefined);
   }
   /**
    * Internal method that processes keys in batches, handling the common logic for both

@@ -431,9 +431,11 @@ export default class Ganon<T extends Record<string, any> & BaseStorageMapping> i
         await this.backup();
       }
     } finally {
-      // Stop sync and cancel pending operations
+      // Stop sync first so no new syncPending/_updateLastBackup can enqueue.
       this.stopSync();
-      this.syncController.cancelPendingOperations();
+      // Await cancel: drains in-flight lastBackup user-doc write before wipe so it
+      // cannot complete inside the next account's login/probe window.
+      await this.syncController.cancelPendingOperations();
 
       // Clear all data
       this.clearAllData();
