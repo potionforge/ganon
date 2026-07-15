@@ -31,8 +31,11 @@ class SyncError extends Error {
       this.code = options.code;
     }
 
-    if (options?.cause !== undefined && 'cause' in Error.prototype) {
-      // Preserve original for diagnostics without losing SyncError shape.
+    if (options?.cause !== undefined) {
+      // Assign unconditionally: `cause` is never on Error.prototype (it's an
+      // own property set per-instance by ES2022 constructors), so an `in`
+      // prototype check would make this branch dead on Node/V8/Hermes alike.
+      // Nonstandard own properties are harmless on engines without native cause.
       (this as Error & { cause?: unknown }).cause = options.cause;
     }
 
