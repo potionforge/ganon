@@ -35,9 +35,9 @@ cache wipe and not a per-key-set fan-out across documents.
 | `restore` → `getRemoteMetadataOnly` | No — wants the just-warmed `hydrateMetadata` snapshot | `hydrateMetadata` → `invalidateCache` (full fetch per doc) first | Clear — this is why keyed must be cache-served |
 | `hydrate` → `needsHydration` → coordinator `getRemoteMetadata()` | Yes | `invalidateCacheForHydration` before check | Clear — unkeyed path; invalidation upstream |
 | `hydrate` → first `getRemoteMetadataOnly` | Yes (conflict/integrity) | Same invalidate via `needsHydration` moments earlier | Clear — reads warm post-invalidate |
-| `hydrate` integrity retry loop | Yes — value/digest race | Explicit `invalidateCache` before each retry (must not rely on keys-as-bypass) | Clear when invalidate stays in the loop |
+| `hydrate` integrity retry loop | Yes — value/digest race | Explicit `invalidateCache` before each retry | Clear when invalidate stays in the loop — keys-as-bypass was removed in beta-6.2; before that, keyed reads accidentally forced fresh fetches |
 | `forceHydrate` → first `getRemoteMetadataOnly` | Yes | `invalidateCacheForHydration` per key before fetch | Clear |
-| `forceHydrate` integrity retry loop | Yes | Same as hydrate — explicit invalidate before each retry | Clear when invalidate stays in the loop |
+| `forceHydrate` integrity retry loop | Yes | Same as hydrate — explicit invalidate before each retry | Clear when invalidate stays in the loop — keys-as-bypass was removed in beta-6.2; before that, keyed reads accidentally forced fresh fetches |
 | `_forceMetadataRefresh` → `getRemoteMetadataOnly` | Yes | `invalidateCache` + `invalidateCacheForHydration` before read | Clear |
 | `MetadataCoordinator.syncToRemote` → `getRemoteMetadata()` | TTL or already-fetched OK for pending flush | Unkeyed; fetches only if cache invalid | Clear — not keyed |
 | `ensureConsistency` → `getRemoteMetadata()` | TTL | Unkeyed if invalid | Clear |
