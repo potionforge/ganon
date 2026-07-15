@@ -552,6 +552,10 @@ export default class SyncController<T extends BaseStorageMapping> implements ISy
               const config = { ...this._integrityFailureConfig, ...this._currentIntegrityConfig };
 
               for (let attempt = 1; attempt <= config.maxRetries; attempt++) {
+                // Integrity race: value can land before its digest. Retries must
+                // force a fresh metadata read — keyed getRemoteMetadataOnly is
+                // cache-served and is not a bypass.
+                await this.metadataManager.invalidateCache(key);
                 const refreshedMetadata = await this.metadataManager.getRemoteMetadataOnly(key);
                 if (refreshedMetadata && refreshedMetadata.digest === remoteComputedDigest) {
                   Log.info(`Ganon: Metadata sync successful on attempt ${attempt} for key ${key}`);
@@ -699,6 +703,8 @@ export default class SyncController<T extends BaseStorageMapping> implements ISy
             const config = { ...this._integrityFailureConfig, ...this._currentIntegrityConfig };
 
             for (let attempt = 1; attempt <= config.maxRetries; attempt++) {
+              // Integrity race: force fresher-than-cache metadata (see hydrate path).
+              await this.metadataManager.invalidateCache(key);
               const refreshedMetadata = await this.metadataManager.getRemoteMetadataOnly(key);
               if (refreshedMetadata && refreshedMetadata.digest === remoteComputedDigest) {
                 Log.info(`Ganon: Metadata sync successful on attempt ${attempt} for key ${key}`);
