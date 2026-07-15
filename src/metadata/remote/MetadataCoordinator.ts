@@ -282,8 +282,11 @@ export default class MetadataCoordinator<T extends BaseStorageMapping> {
   }
 
   private async _doFetchRemoteMetadata(specificKeys?: string[]): Promise<void> {
+    let pathLabel = `users/*/backup/${this.documentKey}`;
     try {
-      const doc = await this.adapter.getDocument(this._getDocRef());
+      const docRef = this._getDocRef();
+      pathLabel = docRef.path;
+      const doc = await this.adapter.getDocument(docRef);
 
       if (doc.exists) {
         const remoteMetadata = doc.data()?.[REMOTE_METADATA_KEY] || {};
@@ -303,7 +306,19 @@ export default class MetadataCoordinator<T extends BaseStorageMapping> {
         this.cache.lastFetchTime = Date.now();
       }
     } catch (error) {
-      Log.error(`Ganon: Failed to fetch remote metadata: ${error}`);
+      Log.error(`Ganon: Failed to fetch remote metadata for document "${this.documentKey}" at ${pathLabel}: ${error}`);
+      if (error && typeof error === 'object' && 'code' in error) {
+        const firestoreError = error as { code: string; message: string };
+        if (firestoreError.code === 'permission-denied') {
+          throw new SyncError(
+            `Permission denied for metadata hydrate (doc get at ${pathLabel}) on backup document "${this.documentKey}": ${firestoreError.message}`,
+            SyncErrorType.SyncNetworkError,
+            undefined,
+            undefined,
+            { code: firestoreError.code, cause: error }
+          );
+        }
+      }
       throw error;
     }
   }
@@ -382,7 +397,9 @@ export default class MetadataCoordinator<T extends BaseStorageMapping> {
   }
 
   /**
-   * Cancel any pending flushes and clear cache for logout
+   * Cancel any pending flushes and clear cache for logout / user change.
+   * Also drops the cached Firestore docRef so the next session cannot write to a
+   * prior user's backup path.
    */
   cancelPendingOperations(): void {
     Log.verbose('Ganon: RemoteMetadataCacheManager.cancelPendingOperations');
@@ -398,5 +415,8 @@ export default class MetadataCoordinator<T extends BaseStorageMapping> {
     // Reset cache
     this.cache.data = {};
     this.cache.lastFetchTime = 0;
+
+    // Drop path binding to the previous user (Ticket B: RAM/user-lifecycle residue).
+    this.docRef = null;
   }
 }

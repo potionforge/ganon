@@ -7,6 +7,7 @@ import { IGanon } from "./models/interfaces/IGanon";
 import { BaseStorageMapping } from "./models/storage/BaseStorageMapping";
 import { BackupResult } from "./models/sync/BackupResult";
 import { RestoreResult } from "./models/sync/RestoreResult";
+import { LoginResult } from "./models/sync/LoginResult";
 import Log from "./utils/Log";
 import SyncError, { SyncErrorType } from "./errors/SyncError";
 import SyncController from "./sync/SyncController";
@@ -350,9 +351,14 @@ export default class Ganon<T extends Record<string, any> & BaseStorageMapping> i
    * - If the same user is already set locally (app reopen), it is a no-op.
    * - If this is a new login and remote has data, restores from remote.
    * - If this is a new login and remote has no data, backs up local guest state.
-   * Returns the action performed: "noop", "restore" or "backup".
+   *
+   * Returns a {@link LoginResult} carrying the action performed, the probe
+   * outcome that drove it, and the number of keys actually restored. Ganon
+   * exposes these facts; it does NOT schedule deferred re-probes or other hidden
+   * behavior — the app owns any policy that reacts to an indeterminate probe
+   * (e.g. a fresh guest whose local data hasn't reached the cloud yet).
    */
-  async login(userId: string): Promise<"noop" | "restore" | "backup"> {
+  async login(userId: string): Promise<LoginResult> {
     if (this.isDestroyed) {
       throw new SyncError('Cannot perform operation: Ganon instance has been destroyed', SyncErrorType.SyncConfigurationError);
     }
@@ -361,24 +367,43 @@ export default class Ganon<T extends Record<string, any> & BaseStorageMapping> i
 
     if (current === userId) {
       Log.info('Ganon: login called with same user; treating as app reopen (noop)');
-      return "noop";
+      // No probe is run for an established session — report that honestly.
+      return { action: 'noop', probe: 'skipped', restoredKeys: 0, restoreFailedKeys: 0 };
     }
 
     // Set identifier locally to mark user as logged in
     this.storageManager.set(this.config.identifierKey as Extract<keyof T, string>, userId as unknown as T[Extract<keyof T, string>]);
 
-    // Decide whether remote has data
-    const hasRemote = await this.syncController.hasAnyRemoteData();
+    // Decide whether remote has data. Indeterminate must NOT choose backup —
+    // that arm runs syncAll with writes; errors-as-empty was the incident trigger.
+    const probe = await this.syncController.probeRemoteData();
 
-    let result: "restore" | "backup";
-    if (hasRemote) {
+    let result: LoginResult;
+    if (probe.status === 'present') {
       Log.info('Ganon: Existing remote data detected on login - restoring');
-      await this.restore();
-      result = "restore";
+      const restoreResult = await this.restore();
+      result = {
+        action: 'restore',
+        probe: 'present',
+        restoredKeys: restoreResult.restoredKeys.length,
+        restoreFailedKeys: restoreResult.failedKeys.length,
+      };
+    } else if (probe.status === 'indeterminate') {
+      Log.warn(
+        `Ganon: Remote probe indeterminate on login (${probe.reason}); refusing backup, attempting restore`
+      );
+      const restoreResult = await this.restore();
+      result = {
+        action: 'restore',
+        probe: 'indeterminate',
+        restoredKeys: restoreResult.restoredKeys.length,
+        restoreFailedKeys: restoreResult.failedKeys.length,
+        probeReason: probe.reason,
+      };
     } else {
       Log.info('Ganon: No remote data detected on login - backing up local guest state');
       await this.backup();
-      result = "backup";
+      result = { action: 'backup', probe: 'absent', restoredKeys: 0, restoreFailedKeys: 0 };
     }
 
     // Start sync if autoStartSync is enabled (sync was stopped during logout)

@@ -23,6 +23,7 @@ import MetadataManager from "../metadata/MetadataManager";
 import computeHash from "../utils/computeHash";
 import UserManager from "../managers/UserManager";
 import { ConflictResolver } from "./ConflictResolver";
+import type { RemoteDataProbeResult } from "../models/sync/RemoteDataProbeResult";
 
 /**
  * Controller responsible for managing synchronization between local storage and Firestore.
@@ -68,26 +69,48 @@ export default class SyncController<T extends BaseStorageMapping> implements ISy
 
   /**
    * Checks if any remote metadata exists for configured keys.
-   * Used to decide whether to restore (existing user) or backup (new user).
+   * Prefer {@link probeRemoteData} at decision points that choose backup vs restore —
+   * this boolean collapses `absent` and `indeterminate` and must not drive backup.
    */
   async hasAnyRemoteData(): Promise<boolean> {
-    Log.verbose('Ganon: SyncController.hasAnyRemoteData');
+    const probe = await this.probeRemoteData();
+    return probe.status === 'present';
+  }
+
+  /**
+   * Probe whether the current user has cloud backup tenure.
+   * Errors are never treated as empty — that false-negative selects the destructive backup arm.
+   */
+  async probeRemoteData(): Promise<RemoteDataProbeResult> {
+    Log.verbose('Ganon: SyncController.probeRemoteData');
     if (!this.userManager.isUserLoggedIn()) {
-      return false;
+      return { status: 'absent' };
     }
 
     const allKeys = this._getAllConfiguredKeys();
+    const errors: string[] = [];
+
     for (const key of allKeys) {
       try {
         const remoteMeta = await this.metadataManager.getRemoteMetadataOnly(key);
         if (remoteMeta) {
-          return true;
+          return { status: 'present' };
         }
       } catch (e) {
-        Log.warn(`Ganon: hasAnyRemoteData error checking key ${String(key)}: ${e}`);
+        const reason = e instanceof Error ? e.message : String(e);
+        Log.warn(`Ganon: probeRemoteData error checking key ${String(key)}: ${reason}`);
+        errors.push(`${String(key)}: ${reason}`);
       }
     }
-    return false;
+
+    if (errors.length > 0) {
+      return {
+        status: 'indeterminate',
+        reason: errors.join(' | '),
+      };
+    }
+
+    return { status: 'absent' };
   }
 
   /**
@@ -310,15 +333,19 @@ export default class SyncController<T extends BaseStorageMapping> implements ISy
 
           // Only mark as pending if hash has changed or no metadata exists
           if (!existingMetadata || existingMetadata.digest !== currentHash) {
-            this.markAsPending(key);
+            // Bypass debounce: syncAll must enqueue ops before processOperations().
+            this._processMarkAsPending(key);
             markedForSync.add(key);
           }
         } else {
+          // No-deletes-in-backup-mode (Ticket B / F3): syncAll never tombstones from
+          // local absence + digest presence. Deletes originate only from explicit
+          // remove()/markAsDeleted by the app — never from a presence diff here.
           const existingMetadata = this.metadataManager.get(key);
-          // Only mark as deleted if metadata exists and has a valid digest
           if (existingMetadata && existingMetadata.digest && existingMetadata.digest !== '') {
-            this.markAsDeleted(key);
-            markedForSync.add(key);
+            Log.info(
+              `Ganon: syncAll skipping delete for absent key ${String(key)} (digest=${existingMetadata.digest}) — no-deletes-in-backup-mode`
+            );
           }
         }
       }
@@ -330,6 +357,19 @@ export default class SyncController<T extends BaseStorageMapping> implements ISy
         .map(result => result.key)
         .filter((key): key is Extract<keyof T, string> => key !== undefined);
 
+      const failedResults = results ? results.filter(result => !result.success) : [];
+      const failedByOp = new Map<string, string>();
+      for (const result of failedResults) {
+        if (!result.key) continue;
+        const reason =
+          result.error instanceof Error
+            ? result.error.message
+            : result.error != null
+              ? String(result.error)
+              : 'unknown operation failure';
+        failedByOp.set(String(result.key), reason);
+      }
+
       // Keys that were marked for sync but failed
       const failedKeys = Array.from(markedForSync).filter(key => !backedUpKeys.includes(key));
 
@@ -337,6 +377,15 @@ export default class SyncController<T extends BaseStorageMapping> implements ISy
       const skippedKeys = allKeys.filter(key => !markedForSync.has(key));
 
       Log.info(`✅ Ganon: syncAll completed for ${backedUpKeys.length} keys - ${failedKeys.length} failed - ${skippedKeys.length} skipped`);
+      if (failedKeys.length > 0) {
+        Log.info(`❌ Ganon: ${failedKeys.length} keys failed to backup: ${failedKeys.join(', ')}`);
+        for (const key of failedKeys) {
+          const reason =
+            failedByOp.get(String(key)) ??
+            'marked for sync but not present in successful processOperations results';
+          Log.error(`❌ Ganon: backup failure detail — ${String(key)}: ${reason}`);
+        }
+      }
 
       if (backedUpKeys.length > 0) {
         this._updateLastBackup();
@@ -776,6 +825,13 @@ export default class SyncController<T extends BaseStorageMapping> implements ISy
    */
   cancelPendingOperations(): void {
     Log.verbose('Ganon: SyncController.cancelPendingOperations');
+
+    if (this._markDebounceTimer) {
+      clearTimeout(this._markDebounceTimer);
+      this._markDebounceTimer = null;
+    }
+    this._pendingMarkKeys.clear();
+
     // Cancel pending metadata sync operations
     this.metadataManager.cancelPendingOperations();
 
@@ -854,6 +910,7 @@ export default class SyncController<T extends BaseStorageMapping> implements ISy
     Log.verbose(`Ganon: SyncController._processKeys, operation: ${operation}`);
     const restoredKeys: Extract<keyof T, string>[] = [];
     const failedKeys: Extract<keyof T, string>[] = [];
+    const failureReasons: string[] = [];
     const integrityFailures: IntegrityFailureInfo[] = [];
 
     // Store the per-invocation configs for use in integrity failure and conflict handling
@@ -872,8 +929,10 @@ export default class SyncController<T extends BaseStorageMapping> implements ISy
             restoredKeys.push(key);
           }
         } catch (error) {
-          Log.error(`Ganon: error ${operation}ing key ${key}: ${error}`);
+          const reason = error instanceof Error ? error.message : String(error);
+          Log.error(`Ganon: error ${operation}ing key ${key}: ${reason}`);
           failedKeys.push(key);
+          failureReasons.push(`${String(key)}: ${reason}`);
         }
       });
 
@@ -883,6 +942,9 @@ export default class SyncController<T extends BaseStorageMapping> implements ISy
     Log.info(`✅ Ganon: ${operation}d ${restoredKeys.length} keys`);
     if (failedKeys.length > 0) {
       Log.info(`❌ Ganon: ${failedKeys.length} keys failed to ${operation}: ${failedKeys.join(', ')}`);
+      for (const reason of failureReasons) {
+        Log.error(`❌ Ganon: ${operation} failure detail — ${reason}`);
+      }
     }
     if (integrityFailures.length > 0) {
       Log.info(`⚠️ Ganon: ${integrityFailures.length} keys had integrity failures: ${integrityFailures.map(f => f.key).join(', ')}`);

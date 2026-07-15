@@ -10,15 +10,34 @@ export enum SyncErrorType {
 }
 
 class SyncError extends Error {
+  /**
+   * Optional Firestore / underlying error code (e.g. `permission-denied`).
+   * Preserved so callers that branch on `.code` keep working after wrap.
+   */
+  readonly code?: string;
+
   constructor(
     message: string,
     readonly type: SyncErrorType,
     readonly retryCount?: number,
-    readonly childErrors?: SyncError[]
+    readonly childErrors?: SyncError[],
+    options?: { code?: string; cause?: unknown }
   ) {
     super(message);
 
     Object.setPrototypeOf(this, SyncError.prototype);
+
+    if (options?.code) {
+      this.code = options.code;
+    }
+
+    if (options?.cause !== undefined) {
+      // Assign unconditionally: `cause` is never on Error.prototype (it's an
+      // own property set per-instance by ES2022 constructors), so an `in`
+      // prototype check would make this branch dead on Node/V8/Hermes alike.
+      // Nonstandard own properties are harmless on engines without native cause.
+      (this as Error & { cause?: unknown }).cause = options.cause;
+    }
 
     if (Error.captureStackTrace) {
       Error.captureStackTrace(this, SyncError);

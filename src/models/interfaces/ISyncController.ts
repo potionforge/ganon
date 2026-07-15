@@ -4,6 +4,7 @@ import { BaseStorageMapping } from "../storage/BaseStorageMapping";
 import { SyncStatus } from "../sync/SyncStatus";
 import { IntegrityFailureConfig } from "../config/IntegrityFailureConfig";
 import { ConflictResolutionConfig } from "../config/ConflictResolutionConfig";
+import type { RemoteDataProbeResult } from "../sync/RemoteDataProbeResult";
 
 export interface ISyncController<T extends BaseStorageMapping> {
   startSyncInterval(): void;
@@ -22,4 +23,9 @@ export interface ISyncController<T extends BaseStorageMapping> {
   getSyncStatusSummary(): Record<SyncStatus, number>;
   hasPendingOperations(): boolean;
   hasAnyRemoteData(): Promise<boolean>;
+  /**
+   * Discriminated remote-tenure probe. Use this (not hasAnyRemoteData) when choosing
+   * backup vs restore — indeterminate must not select backup.
+   */
+  probeRemoteData(): Promise<RemoteDataProbeResult>;
 }

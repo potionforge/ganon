@@ -1113,6 +1113,55 @@ describe('SyncController Tests', () => {
       expect(result.backedUpKeys).toContain('testKey');
       expect(result.failedKeys).toContain('anotherKey');
     });
+
+    it('syncAll never markAsDeleted for locally-absent keys even with poisoned digests (no-deletes-in-backup-mode)', async () => {
+      mockStorage.contains.mockReturnValue(false);
+      mockMetadataManager.get.mockReturnValue({
+        digest: 'ae9e4ba6466e9ecb',
+        version: 1,
+        syncStatus: SyncStatus.Synced,
+      });
+      mockOperationRepo.processOperations.mockResolvedValue([]);
+
+      const markSpy = jest.spyOn(syncController, 'markAsDeleted');
+      const result = await syncController.syncAll();
+
+      expect(markSpy).not.toHaveBeenCalled();
+      expect(result.backedUpKeys).toHaveLength(0);
+      expect(mockOperationRepo.addOperation).not.toHaveBeenCalled();
+      markSpy.mockRestore();
+    });
+  });
+
+  describe('probeRemoteData', () => {
+    it('returns present when any key has remote metadata', async () => {
+      mockUserManager.isUserLoggedIn.mockReturnValue(true);
+      mockMetadataManager.getRemoteMetadataOnly
+        .mockResolvedValueOnce(undefined)
+        .mockResolvedValueOnce({ digest: 'abc', version: 1 });
+
+      await expect(syncController.probeRemoteData()).resolves.toEqual({ status: 'present' });
+    });
+
+    it('returns absent when every key is empty with no errors', async () => {
+      mockUserManager.isUserLoggedIn.mockReturnValue(true);
+      mockMetadataManager.getRemoteMetadataOnly.mockResolvedValue(undefined);
+
+      await expect(syncController.probeRemoteData()).resolves.toEqual({ status: 'absent' });
+    });
+
+    it('returns indeterminate when probe reads fail (does not collapse to absent)', async () => {
+      mockUserManager.isUserLoggedIn.mockReturnValue(true);
+      mockMetadataManager.getRemoteMetadataOnly.mockRejectedValue(
+        Object.assign(new Error('denied'), { code: 'permission-denied' })
+      );
+
+      const result = await syncController.probeRemoteData();
+      expect(result.status).toBe('indeterminate');
+      if (result.status === 'indeterminate') {
+        expect(result.reason).toContain('denied');
+      }
+    });
   });
 
   describe('Restore Operations', () => {
@@ -1134,6 +1183,20 @@ describe('SyncController Tests', () => {
       expect(result.restoredKeys).toContain('testKey');
       expect(result.failedKeys).toHaveLength(0);
       expect(mockStorage.set).toHaveBeenCalledWith('testKey', remoteValue);
+    });
+
+    it('restore on an empty remote returns success with nothing restored (real fetch→undefined path)', async () => {
+      // Genuinely-fresh / empty cloud: every key fetch resolves undefined. This is the REAL
+      // restore path that the Ganon-level indeterminate tests mock at the syncController
+      // boundary — it must not throw, must not write, and must report success with 0 keys.
+      mockFirestore.fetch.mockResolvedValue(undefined);
+
+      const result = await syncController.restore();
+
+      expect(result.success).toBe(true);
+      expect(result.restoredKeys).toHaveLength(0);
+      expect(result.failedKeys).toHaveLength(0);
+      expect(mockStorage.set).not.toHaveBeenCalled();
     });
 
     it('should handle restore failures gracefully', async () => {

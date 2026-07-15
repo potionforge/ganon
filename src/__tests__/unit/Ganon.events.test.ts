@@ -34,6 +34,7 @@ const mockSyncController: any = {
   syncAll: jest.fn(),
   restore: jest.fn(),
   hasAnyRemoteData: jest.fn(),
+  probeRemoteData: jest.fn(),
 };
 
 const mockFirestoreManager: any = {};

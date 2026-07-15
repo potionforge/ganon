@@ -42,6 +42,41 @@ export default class FirestoreManager<T extends BaseStorageMapping> implements I
   }
 
   /**
+   * Describes the Firestore call that failed for richer permission-denied diagnostics.
+   * Document keys → get/set on the backup doc; collection (chunked) keys → list/write on the chunk subcollection.
+   */
+  private _describeAccess(
+    operation: 'fetch' | 'backup' | 'delete',
+    type: DocumentOrCollection | undefined,
+    path: string | undefined,
+  ): string {
+    const pathLabel = path || 'unknown-path';
+    if (type === DocumentOrCollection.Collection) {
+      const firestoreOp =
+        operation === 'fetch' ? 'list' : operation === 'delete' ? 'list+delete' : 'list+write';
+      return `collection ${firestoreOp} at ${pathLabel}`;
+    }
+    if (type === DocumentOrCollection.Document) {
+      const firestoreOp =
+        operation === 'fetch' ? 'get' : operation === 'delete' ? 'get+update' : 'set';
+      return `doc ${firestoreOp} at ${pathLabel}`;
+    }
+    return pathLabel;
+  }
+
+  private _permissionDeniedMessage(
+    operation: 'fetch' | 'backup' | 'delete',
+    key: Extract<keyof T, string>,
+    type: DocumentOrCollection | undefined,
+    path: string | undefined,
+    firestoreMessage?: string,
+  ): string {
+    const access = this._describeAccess(operation, type, path);
+    const detail = firestoreMessage ? `: ${firestoreMessage}` : '';
+    return `Permission denied for ${operation} on key "${String(key)}" (${access})${detail}`;
+  }
+
+  /**
    * Runs a transaction on Firestore with concurrency control and timeout protection
    * @param callback - The callback to run within the transaction
    * @returns Promise that resolves with the result of the transaction
@@ -196,6 +231,8 @@ export default class FirestoreManager<T extends BaseStorageMapping> implements I
       return;
     }
 
+    let accessType: DocumentOrCollection | undefined;
+    let accessPath: string | undefined;
     try {
       // Pre-validate data before attempting backup
       const validation = this.dataProcessor.validateForFirestore(value);
@@ -205,6 +242,8 @@ export default class FirestoreManager<T extends BaseStorageMapping> implements I
       }
 
       const { ref, type } = this.referenceManager.getRefForKey(key);
+      accessType = type;
+      accessPath = ref.path;
 
       if (type === DocumentOrCollection.Document) {
         Log.verbose(`Ganon: FirestoreManager.backup, key: ${String(key)}, type: ${type}`);
@@ -227,8 +266,11 @@ export default class FirestoreManager<T extends BaseStorageMapping> implements I
         switch (firestoreError.code) {
           case 'permission-denied':
             throw new SyncError(
-              `Permission denied for backup operation on key ${String(key)}`,
-              SyncErrorType.SyncNetworkError
+              this._permissionDeniedMessage('backup', key, accessType, accessPath, firestoreError.message),
+              SyncErrorType.SyncNetworkError,
+              undefined,
+              undefined,
+              { code: firestoreError.code, cause: error }
             );
           case 'unavailable':
           case 'deadline-exceeded':
@@ -319,8 +361,12 @@ export default class FirestoreManager<T extends BaseStorageMapping> implements I
       );
     }
 
+    let accessType: DocumentOrCollection | undefined;
+    let accessPath: string | undefined;
     try {
       const { ref, type } = this.referenceManager.getRefForKey(key);
+      accessType = type;
+      accessPath = ref.path;
 
       if (type === DocumentOrCollection.Document) {
         const docSnap = await this.adapter.getDocument(ref as FirebaseFirestoreTypes.DocumentReference);
@@ -377,8 +423,11 @@ export default class FirestoreManager<T extends BaseStorageMapping> implements I
         switch (firestoreError.code) {
           case 'permission-denied':
             throw new SyncError(
-              `Permission denied for fetch operation on key ${String(key)}`,
-              SyncErrorType.SyncNetworkError
+              this._permissionDeniedMessage('fetch', key, accessType, accessPath, firestoreError.message),
+              SyncErrorType.SyncNetworkError,
+              undefined,
+              undefined,
+              { code: firestoreError.code, cause: error }
             );
           case 'unavailable':
           case 'deadline-exceeded':
@@ -452,8 +501,12 @@ export default class FirestoreManager<T extends BaseStorageMapping> implements I
       );
     }
 
+    let accessType: DocumentOrCollection | undefined;
+    let accessPath: string | undefined;
     try {
       const { ref, type } = this.referenceManager.getRefForKey(key);
+      accessType = type;
+      accessPath = ref.path;
 
       if (type === DocumentOrCollection.Document) {
         const docRef = ref as FirebaseFirestoreTypes.DocumentReference;
@@ -505,8 +558,11 @@ export default class FirestoreManager<T extends BaseStorageMapping> implements I
         switch (firestoreError.code) {
           case 'permission-denied':
             throw new SyncError(
-              `Permission denied for delete operation on key ${String(key)}`,
-              SyncErrorType.SyncNetworkError
+              this._permissionDeniedMessage('delete', key, accessType, accessPath, firestoreError.message),
+              SyncErrorType.SyncNetworkError,
+              undefined,
+              undefined,
+              { code: firestoreError.code, cause: error }
             );
           case 'unavailable':
           case 'deadline-exceeded':

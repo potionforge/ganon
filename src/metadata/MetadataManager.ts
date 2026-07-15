@@ -37,12 +37,30 @@ export default class MetadataManager<T extends BaseStorageMapping> {
     if (!this.config?.cloudConfig) {
       return;
     }
-    const coordinators = Object.keys(this.config.cloudConfig)
-      .map(documentName => this.coordinatorRepo.getCoordinator(documentName as Extract<keyof T, string>))
-      .filter(Boolean);
+    const documentNames = Object.keys(this.config.cloudConfig);
+    const results = await Promise.allSettled(
+      documentNames.map(async (documentName) => {
+        const coordinator = this.coordinatorRepo.getCoordinator(documentName as Extract<keyof T, string>);
+        if (!coordinator) {
+          return;
+        }
+        await coordinator.invalidateCache();
+      })
+    );
 
-    // Run in parallel
-    await Promise.all(coordinators.map(coordinator => coordinator.invalidateCache()));
+    const failures = results
+      .map((result, index) => ({ result, documentName: documentNames[index] }))
+      .filter((entry): entry is { result: PromiseRejectedResult; documentName: string } => entry.result.status === 'rejected');
+
+    if (failures.length > 0) {
+      const details = failures
+        .map(({ documentName, result }) => {
+          const reason = result.reason instanceof Error ? result.reason.message : String(result.reason);
+          return `${documentName}: ${reason}`;
+        })
+        .join(' | ');
+      throw new Error(`Metadata hydrate failed for backup document(s): ${details}`);
+    }
   }
 
   async set(key: Extract<keyof T, string>, metadata: LocalSyncMetadata, scheduleRemoteSync: boolean = true): Promise<void> {
@@ -136,10 +154,18 @@ export default class MetadataManager<T extends BaseStorageMapping> {
   }
 
   /**
-   * Cancel all pending sync operations for user logout
+   * Cancel all pending sync operations for user logout / account switch.
+   * Clears local sync digests from RAM (+ disk) so a same-process re-login cannot
+   * treat prior-account digests as deletion targets (Ticket B).
    */
   cancelPendingOperations(): void {
     Log.verbose('Ganon: MetadataManager.cancelPendingOperations');
+
+    // Local digests live in an in-memory map that clearAllData() does not touch.
+    // Without this, logout/delete leaves orphan digests that spawn delete ops on
+    // the next login's backup arm while the process is still alive.
+    this.localMetadata.clear();
+
     if (!this.config?.cloudConfig) {
       return;
     }
