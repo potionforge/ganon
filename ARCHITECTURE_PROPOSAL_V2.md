@@ -737,3 +737,23 @@ step 8 unblocks.
 
 Consumer cloudConfig concern (intentional; restored device inherits migration cursor).
 Resolved decision and action item: `LTG_ADOPTION.md` §Q6.
+
+### Q7 — Per-site metadata cache freshness: **preserve; do not invent “keys = bypass”**
+
+beta-6.2 wrote down the call-site freshness contract in `CACHE_SEMANTICS.md` (on that
+branch; port alongside any restore-digest / cache work brought forward). Summary:
+
+- TTL-warm cache serves **all** readers, including keyed `getRemoteMetadataOnly`.
+- Sites that need fresher-than-TTL (hydrate / forceHydrate first reads, integrity
+  retries, `_forceMetadataRefresh`) already invalidate via
+  `invalidateCache` / `invalidateCacheForHydration` / `hydrateMetadata` — that
+  explicit path is the contract, not “pass `keys` to force a Firestore read.”
+- `invalidateCache(key)` scopes to **one** document coordinator → one
+  `getDocument` for that backup doc (bounded by `maxRetries` in integrity loops).
+  It does not wipe other coordinators.
+
+**Rearchitecture (esp. steps 4–5 cache / MetadataStore split) must preserve each
+site’s freshness requirement** from that table. Regression shape to avoid: restore
+(or any bulk keyed reader) accidentally reintroducing per-key metadata-doc reads,
+or integrity retries silently reading stale TTL cache because invalidation was
+dropped when the accidental keys-bypass went away.
