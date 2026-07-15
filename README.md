@@ -185,8 +185,9 @@ ganon.set("workouts", userWorkouts);    // GanonDB handles chunking
 Ganon provides a smart `login()` method that automatically handles the login lifecycle:
 
 - **App reopen**: If the same user is already logged in, it's treated as an app reopen (no-op)
-- **Existing user**: If remote data exists, it restores from the cloud
-- **New user**: If no remote data exists, it backs up local guest state to the cloud
+- **Existing user**: If remote data is present, it restores from the cloud
+- **New user**: If remote data is absent, it backs up local guest state to the cloud
+- **Indeterminate remote**: If the remote probe cannot be determined (e.g. permission or network errors), login **refuses backup** and attempts restore instead — so an unknown cloud is never treated as empty
 
 **Example:**
 
@@ -197,13 +198,24 @@ onAuthStateChanged(async (user) => {
     console.log(`Login action: ${result.action}`); // "noop", "restore", or "backup"
     // result.probe: "present" | "absent" | "indeterminate" | "skipped"
     // result.restoredKeys / result.restoreFailedKeys: restore quality (0 on backup/noop)
+    // result.probeReason?: string — set only when probe === "indeterminate"
   }
 })
 ```
 
 **`LoginResult`:**
+
+| Field | Type | Meaning |
+|-------|------|---------|
+| `action` | `"noop"` \| `"restore"` \| `"backup"` | What login performed |
+| `probe` | `"present"` \| `"absent"` \| `"indeterminate"` \| `"skipped"` | Remote-data probe that drove the decision (`skipped` = no probe ran) |
+| `restoredKeys` | `number` | Keys pulled from cloud (`0` for backup/noop; also `0` if restore hit an empty/unreadable remote) |
+| `restoreFailedKeys` | `number` | Keys that failed during restore (`0` for backup/noop); non-zero with `probe: "present"` means a partial restore |
+| `probeReason` | `string?` | Present only when `probe: "indeterminate"` — aggregated probe failure reason |
+
+**Actions:**
 - `action: "noop"` — Same user already logged in (app reopen); `probe` is `"skipped"` (no probe ran)
-- `action: "restore"` — Restored from remote; check `probe` and `restoreFailedKeys` for quality
+- `action: "restore"` — Restored from remote; inspect `probe` (`present` vs `indeterminate`) and `restoreFailedKeys` for quality
 - `action: "backup"` — New user detected, backed up local guest state (`probe: "absent"`)
 
 ### User logout
@@ -411,9 +423,18 @@ import {
   // Sync Status
   SyncStatus,
 
-  // Results
+  // Login / results
+  LoginResult,
+  LoginAction,
+  LoginProbeStatus,
+  RemoteDataProbeResult,
   RestoreResult,
   BackupResult,
+
+  // Errors
+  SyncError,
+  SyncErrorType,
+  IntegrityFailureError,
 
   // Events
   GanonEventName,
@@ -438,13 +459,60 @@ import {
 * `IntegrityFailureRecoveryStrategy.USE_REMOTE` - Trust remote data
 * `IntegrityFailureRecoveryStrategy.SKIP` - Skip problematic keys
 
+#### Login types
+
+* `LoginResult` - Return type of `ganon.login()` (see [User login](#user-login))
+* `LoginAction` - `"noop"` \| `"restore"` \| `"backup"`
+* `LoginProbeStatus` - `"present"` \| `"absent"` \| `"indeterminate"` \| `"skipped"`
+* `RemoteDataProbeResult` - Discriminated probe outcome: `{ status: 'present' }` \| `{ status: 'absent' }` \| `{ status: 'indeterminate'; reason: string }`
+
 #### Event types
 
 * `GanonEventName` - `"hydrationComplete"` | `"syncComplete"` | `"restoreComplete"`
 * `GanonEventPayloadMap` - Maps each event name to its payload type (`RestoreResult` or `BackupResult`)
 * `GanonEventListener<N>` - Callback type for event `N`
 
+#### Errors
+
+* `SyncError` - Thrown/returned for sync failures; see [Sync failure diagnostics](#sync-failure-diagnostics)
+* `SyncErrorType` - Error category enum (`SyncFailed`, `SyncNetworkError`, `SyncTimeout`, `SyncMultipleErrors`, etc.)
+* `IntegrityFailureError` - Specialized `SyncError` for hash mismatches during sync
+
 </details>
+
+### Sync failure diagnostics
+
+Sync operations surface failures as `SyncError` (and optionally leave per-key outcomes on result objects).
+
+**`SyncError` fields / helpers:**
+
+| Field / method | Meaning |
+|----------------|---------|
+| `type` | `SyncErrorType` category |
+| `code` | Optional Firestore / underlying error code (e.g. `"permission-denied"`) |
+| `cause` | Optional original error preserved for diagnostics |
+| `childErrors` | Nested errors when `type` is `SyncMultipleErrors` |
+| `getAllMessages()` | Flattened messages including child errors |
+
+**Per-key outcomes** (non-throwing partial failures):
+
+* `BackupResult.failedKeys` / `backedUpKeys` / `skippedKeys` — after `ganon.backup()` or `syncComplete`
+* `RestoreResult.failedKeys` / `restoredKeys` / `integrityFailures` — after `ganon.restore()`, hydrate, or `restoreComplete` / `hydrationComplete`
+
+```ts
+import { SyncError, SyncErrorType } from '@potionforge/ganon';
+
+try {
+  await ganon.backup();
+} catch (err) {
+  if (err instanceof SyncError) {
+    console.error(err.type, err.code, err.message);
+    if (err.type === SyncErrorType.SyncMultipleErrors) {
+      console.error(err.getAllMessages());
+    }
+  }
+}
+```
 
 ### Updating Data Externally
 
