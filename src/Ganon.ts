@@ -74,6 +74,11 @@ export default class Ganon<T extends Record<string, any> & BaseStorageMapping> i
       this.userManager = userManager;
       this.isInitialized = true;
 
+      // Permanent build identity — also proves Metro resolved this package tree.
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      const { version: ganonVersion } = require('../package.json') as { version: string };
+      Log.info(`Ganon: v${ganonVersion}`);
+
       // Start sync if autoStartSync is enabled and user is logged in
       if (config.autoStartSync && this.isUserLoggedIn()) {
         this.startSync();
