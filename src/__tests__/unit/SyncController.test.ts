@@ -1175,7 +1175,13 @@ describe('SyncController Tests', () => {
     it('should restore data from cloud successfully', async () => {
       // Setup test data
       const remoteValue = 'remote value';
+      const remoteVersion = 1_700_000_000_000;
+      const computeHash = require('../../utils/computeHash').default;
       mockFirestore.fetch.mockResolvedValue(remoteValue);
+      mockMetadataManager.getRemoteMetadataOnly.mockResolvedValue({
+        digest: 'remote-digest-ignored',
+        version: remoteVersion,
+      });
 
       // Execute restore
       const result = await syncController.restore();
@@ -1185,6 +1191,28 @@ describe('SyncController Tests', () => {
       expect(result.restoredKeys).toContain('testKey');
       expect(result.failedKeys).toHaveLength(0);
       expect(mockStorage.set).toHaveBeenCalledWith('testKey', remoteValue);
+      // Digest recomputed locally; version copied from remote (not Date.now())
+      expect(mockMetadataManager.set).toHaveBeenCalledWith('testKey', {
+        syncStatus: SyncStatus.Synced,
+        digest: computeHash(remoteValue),
+        version: remoteVersion,
+      }, false);
+    });
+
+    it('restore seeds version 0 when remote metadata is missing (fail toward re-hydrate, not clobber)', async () => {
+      const remoteValue = 'orphaned-value';
+      const computeHash = require('../../utils/computeHash').default;
+      mockFirestore.fetch.mockResolvedValue(remoteValue);
+      mockMetadataManager.getRemoteMetadataOnly.mockResolvedValue(undefined);
+
+      const result = await syncController.restore();
+
+      expect(result.success).toBe(true);
+      expect(mockMetadataManager.set).toHaveBeenCalledWith('testKey', {
+        syncStatus: SyncStatus.Synced,
+        digest: computeHash(remoteValue),
+        version: 0,
+      }, false);
     });
 
     it('restore on an empty remote returns success with nothing restored (real fetch→undefined path)', async () => {
@@ -1213,6 +1241,65 @@ describe('SyncController Tests', () => {
       expect(result.success).toBe(false);
       expect(result.failedKeys).toContain('testKey');
       expect(result.restoredKeys).toHaveLength(0);
+    });
+
+    it('after restore, syncAll marks zero keys when values are untouched (digest invariant)', async () => {
+      // Encodes the invariant the digest system exists for: restore leaves the engine
+      // believing local == remote. Without seeding digests on restore, every logout
+      // re-uploads all restored keys (stale-clobber risk on multi-device).
+      const computeHash = require('../../utils/computeHash').default;
+      const remoteByKey: Record<string, unknown> = {
+        testKey: 'restored-test',
+        anotherKey: 99,
+      };
+
+      mockFirestore.fetch.mockImplementation(async (key: string) => remoteByKey[key]);
+      mockMetadataManager.getRemoteMetadataOnly.mockImplementation(async (key: string) => ({
+        digest: 'remote-ignored',
+        version: key === 'testKey' ? 111 : 222,
+      }));
+
+      // Track seeded digests so get() reflects restore's metadata writes
+      const seeded = new Map<string, LocalSyncMetadata>();
+      mockMetadataManager.set.mockImplementation(async (key: string, metadata: LocalSyncMetadata) => {
+        seeded.set(key, metadata);
+      });
+      mockMetadataManager.get.mockImplementation((key: string) => seeded.get(key));
+
+      const result = await syncController.restore();
+      expect(result.success).toBe(true);
+      expect(result.restoredKeys).toEqual(expect.arrayContaining(['testKey', 'anotherKey']));
+      expect(seeded.get('testKey')?.digest).toBe(computeHash(remoteByKey.testKey));
+      expect(seeded.get('anotherKey')?.digest).toBe(computeHash(remoteByKey.anotherKey));
+      expect(seeded.get('testKey')?.version).toBe(111);
+      expect(seeded.get('anotherKey')?.version).toBe(222);
+
+      mockStorage.contains.mockImplementation((key: string) => key in remoteByKey);
+      mockStorage.get.mockImplementation((key: string) => remoteByKey[key] as any);
+      mockOperationRepo.addOperation.mockClear();
+      mockOperationRepo.processOperations.mockResolvedValue([]);
+
+      const backup = await syncController.syncAll();
+
+      expect(mockOperationRepo.addOperation).not.toHaveBeenCalled();
+      expect(backup.backedUpKeys).toHaveLength(0);
+      expect(backup.failedKeys).toHaveLength(0);
+      expect(backup.skippedKeys).toEqual(expect.arrayContaining(['testKey', 'anotherKey']));
+    });
+  });
+
+  describe('Error Handling', () => {
+    it('should handle network timeouts', async () => {
+      // Setup test data with timeout
+      mockFirestore.fetch.mockRejectedValue(new Error('Network timeout'));
+      mockMetadataManager.needsHydration.mockResolvedValue(true);
+
+      // Execute operation
+      const result = await syncController.hydrate();
+
+      // Verify results
+      expect(result.success).toBe(false);
+      expect(result.failedKeys).toContain('testKey');
     });
 
     it('should handle invalid data gracefully', async () => {

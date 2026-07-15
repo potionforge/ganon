@@ -435,7 +435,22 @@ export default class SyncController<T extends BaseStorageMapping> implements ISy
       const value = await this.firestore.fetch(key);
       if (value !== undefined) {
         this.storage.set(key, value as T[Extract<keyof T, string>]);
-        Log.info(`✅ Ganon: restored key ${key}`);
+        // Seed local digests from the restored value (same invariant hydrate maintains).
+        // Digest: recompute locally — do not copy remote digest — so syncAll compares
+        // future local hashes against a digest from the same serializer.
+        // Version: copy from remote metadata (hydrate does this). version participates
+        // in needsHydration (remote.v > local.v) and LAST_MODIFIED_WINS; Date.now()
+        // would falsely claim this copy is newer than the remote it came from.
+        const localDigest = computeHash(value);
+        const remoteMetadata = await this.metadataManager.getRemoteMetadataOnly(key);
+        await this.metadataManager.set(key, {
+          syncStatus: SyncStatus.Synced,
+          digest: localDigest,
+          // Unknown remote version → 0 so newer-wins/hydrate re-hydrate and self-correct
+          // (never Date.now(): that invents "local newer" for a value that is remote's copy).
+          version: remoteMetadata?.version ?? 0,
+        }, false); // Don't push metadata to remote during restore
+        Log.info(`✅ Ganon: restored key ${key} with hash ${localDigest}`);
         return true;
       }
       return false;
