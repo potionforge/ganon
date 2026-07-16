@@ -790,7 +790,11 @@ export default class FirestoreManager<T extends BaseStorageMapping> implements I
    */
   async backupLastBackupToUserDocument(
     timestamp: number,
-    options?: { transaction?: FirebaseFirestoreTypes.Transaction }
+    options?: {
+      transaction?: FirebaseFirestoreTypes.Transaction;
+      /** User identity at _updateLastBackup schedule time (cross-session guard). */
+      ownerAtSchedule?: string | null;
+    }
   ): Promise<void> {
     Log.verbose('Ganon: FirestoreManager.backupLastBackupToUserDocument');
 
@@ -799,9 +803,29 @@ export default class FirestoreManager<T extends BaseStorageMapping> implements I
       return;
     }
 
+    // Identity who earned this lastBackup at schedule time. Must be passed in —
+    // capturing here is useless: getUserRef() is sync, so a local capture cannot
+    // diverge before the first await. Compare against ownerAtSchedule when the
+    // write actually runs (after pending ops / after await boundary).
+    const ownerAtSchedule = options?.ownerAtSchedule;
     try {
+      if (
+        !this.userManager.isUserLoggedIn() ||
+        (ownerAtSchedule !== undefined &&
+          this.userManager.getCurrentUser() !== ownerAtSchedule)
+      ) {
+        Log.info(
+          'Ganon: Skipping lastBackup backup - session torn down before user-doc write',
+        );
+        return;
+      }
       const userRef = this.referenceManager.getUserRef();
-      await this._backupDocumentField(userRef, 'lastBackup' as Extract<keyof T, string>, timestamp, options);
+      await this._backupDocumentField(
+        userRef,
+        'lastBackup' as Extract<keyof T, string>,
+        timestamp,
+        options?.transaction !== undefined ? { transaction: options.transaction } : undefined,
+      );
       Log.info('Ganon: Successfully backed up lastBackup to user document');
     } catch (error) {
       Log.error(`Ganon: Failed to backup lastBackup to user document: ${error}`);

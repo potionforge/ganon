@@ -93,8 +93,10 @@ export default class MetadataCoordinator<T extends BaseStorageMapping> {
       );
     }
 
-    // Return cached data if still valid and no specific keys requested
-    if (!this._shouldInvalidateCache() && !keys) {
+    // Cache hit: serve even when callers pass specific keys. Keys select from the
+    // last fetch — they must not force a Firestore read per key (restore would
+    // otherwise redo getDocument once per restored key after hydrateMetadata).
+    if (!this._shouldInvalidateCache()) {
       Log.verbose('Ganon: Using cached remote metadata');
       return this.cache.data;
     }

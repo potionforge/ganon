@@ -254,6 +254,26 @@ describe('MetadataCoordinator Tests', () => {
       expect(mockLocalMetadata.set).not.toHaveBeenCalled(); // Should not update local metadata during fetch
     });
 
+    it('warm cache serves keyed getRemoteMetadata without another Firestore read', async () => {
+      // Restore seeds digests via getRemoteMetadataOnly([key]) after hydrateMetadata
+      // warmed the cache; that keyed call must not getDocument per key.
+      const key = 'settings' as keyof TestStorageMapping;
+      mockAdapter.getDocument.mockResolvedValue({
+        exists: true,
+        data: () => ({
+          [REMOTE_METADATA_KEY]: { [key]: { v: 5, d: 'seeded' } },
+        }),
+      } as any);
+
+      await coordinator.getRemoteMetadata(); // full warm (hydrateMetadata path)
+      mockAdapter.getDocument.mockClear();
+
+      const cached = await coordinator.getRemoteMetadata([key as string]);
+
+      expect(mockAdapter.getDocument).not.toHaveBeenCalled();
+      expect(cached[key]).toEqual({ v: 5, d: 'seeded' });
+    });
+
     it('should handle sync status updates correctly', () => {
       const key = 'settings' as keyof TestStorageMapping;
       const status = SyncStatus.Pending;
