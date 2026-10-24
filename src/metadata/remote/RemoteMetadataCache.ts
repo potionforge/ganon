@@ -45,7 +45,8 @@ export default class RemoteMetadataCache<T extends BaseStorageMapping> {
       );
     }
 
-    if (!this._needsFetch() && !keys) {
+    // Warm cache serves keyed reads too — keys select from the last fetch, not a per-key Firestore round-trip.
+    if (!this._needsFetch()) {
       return this.cache.data;
     }
 

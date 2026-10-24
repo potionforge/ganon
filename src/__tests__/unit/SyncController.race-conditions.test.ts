@@ -457,7 +457,7 @@ describe('SyncEngine - Race Conditions', () => {
       expect(mockOperationRepo.addOperation).toHaveBeenCalledTimes(1);
     });
 
-    it('should cancel pending operations on logout to prevent race conditions', () => {
+    it('should cancel pending operations on logout to prevent race conditions', async () => {
       // Add some pending operations with different keys
       syncEngine.markAsPending('testKey');
       syncEngine.markAsDeleted('anotherKey');
@@ -467,7 +467,7 @@ describe('SyncEngine - Race Conditions', () => {
       expect(mockOperationRepo.addOperation).toHaveBeenCalledTimes(2);
 
       // Cancel pending operations (simulating logout)
-      syncEngine.cancelPendingOperations();
+      await syncEngine.cancelPendingOperations();
 
       // Verify operations were cleared
       expect(mockOperationRepo.clearAll).toHaveBeenCalledTimes(1);

@@ -31,7 +31,7 @@ const mockSyncEngine: any = {
   stop: jest.fn(),
   startSyncInterval: jest.fn(),
   stopSyncInterval: jest.fn(),
-  cancelPendingOperations: jest.fn(),
+  cancelPendingOperations: jest.fn().mockResolvedValue(undefined),
   destroy: jest.fn(),
   syncAll: jest.fn(),
   restore: jest.fn(),

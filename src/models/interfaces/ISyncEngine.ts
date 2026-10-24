@@ -29,5 +29,9 @@ export interface ISyncEngine<T extends BaseStorageMapping> {
    * backup vs restore — indeterminate must not select backup.
    */
   probeRemoteData(): Promise<RemoteDataProbeResult>;
-  cancelPendingOperations(): void;
+  /**
+   * Drain in-flight lastBackup writes and clear op/metadata queues. Await on logout
+   * before clearAllData so residue cannot complete mid-login of the next account.
+   */
+  cancelPendingOperations(): Promise<void>;
 }

@@ -8,6 +8,7 @@ import { IGanon } from "./models/interfaces/IGanon";
 import { BaseStorageMapping } from "./models/storage/BaseStorageMapping";
 import { BackupResult } from "./models/sync/BackupResult";
 import { RestoreResult } from "./models/sync/RestoreResult";
+import { LoginResult } from "./models/sync/LoginResult";
 import Log from "./utils/Log";
 import SyncError, { SyncErrorType } from "./errors/SyncError";
 import SyncEngine from "./sync/SyncEngine";
@@ -96,8 +97,10 @@ export default class Ganon<T extends Record<string, any> & BaseStorageMapping> i
       this.keyRouter = keyRouter;
       this.isInitialized = true;
 
-      // Load canary so app logs prove this local build is what Metro resolved.
-      Log.info('Ganon: build canary — local-main-ticket-B-2026-07-13 (teardown + no-deletes + probe)');
+      // Permanent build identity — also proves Metro resolved this package tree.
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      const { version: ganonVersion } = require('../package.json') as { version: string };
+      Log.info(`Ganon: v${ganonVersion}`);
 
       // Start sync if autoStartSync is enabled and user is logged in
       if (this.resolvedConfig.autoStartSync && this.isUserLoggedIn()) {
@@ -440,10 +443,14 @@ export default class Ganon<T extends Record<string, any> & BaseStorageMapping> i
    * - If the same user is already set locally (app reopen), it is a no-op.
    * - If this is a new login and remote has data, restores from remote.
    * - If this is a new login and remote has no data, backs up local guest state.
-   * Returns the path taken ("noop", "restore", or "backup"), not whether data was applied;
-   * use `whenHydrated()` for hydration status (e.g. `'stopped'` if teardown interleaved).
+   *
+   * Returns a {@link LoginResult} carrying the action performed, the probe
+   * outcome that drove it, and the number of keys actually restored. Use
+   * `whenHydrated()` for hydration status (e.g. `'stopped'` if teardown interleaved).
+   * Ganon exposes these facts; it does NOT schedule deferred re-probes — the app
+   * owns any policy that reacts to an indeterminate probe.
    */
-  async login(userId: string): Promise<"noop" | "restore" | "backup"> {
+  async login(userId: string): Promise<LoginResult> {
     if (this.isDestroyed) {
       throw new SyncError('Cannot perform operation: Ganon instance has been destroyed', SyncErrorType.SyncConfigurationError);
     }
@@ -452,7 +459,8 @@ export default class Ganon<T extends Record<string, any> & BaseStorageMapping> i
 
     if (current === userId) {
       Log.info('Ganon: login called with same user; treating as app reopen (noop)');
-      return "noop";
+      // No probe is run for an established session — report that honestly.
+      return { action: 'noop', probe: 'skipped', restoredKeys: 0, restoreFailedKeys: 0 };
     }
 
     this._beginHydrationCycle();
@@ -461,30 +469,35 @@ export default class Ganon<T extends Record<string, any> & BaseStorageMapping> i
       // Set identifier locally to mark user as logged in
       this.storageManager.set(this.config.identifierKey as Extract<keyof T, string>, userId as unknown as T[Extract<keyof T, string>]);
 
-      // Decide whether remote has data. Indeterminate must NOT choose backup —
-      // that arm runs syncAll with writes; errors-as-empty was the incident trigger.
+      // Indeterminate must NOT choose backup — that arm runs syncAll with writes.
       const probe = await this.syncEngine.probeRemoteData();
 
-      let result: "restore" | "backup";
+      let result: LoginResult;
       if (probe.status === 'present') {
         Log.info('Ganon: Existing remote data detected on login - restoring');
         const restoreResult = await this.restore();
-        if (restoreResult.aborted) {
-          // stopSync() mid-login wins: sync stays stopped, 'stopped' settled. Caller
-          // resumes via startSync() — never countermand an interleaved stop here.
-          return "restore";
-        }
-        result = "restore";
+        result = {
+          action: 'restore',
+          probe: 'present',
+          restoredKeys: restoreResult.restoredKeys.length,
+          restoreFailedKeys: restoreResult.failedKeys.length,
+        };
       } else if (probe.status === 'indeterminate') {
         Log.warn(
           `Ganon: Remote probe indeterminate on login (${probe.reason}); refusing backup, attempting restore`
         );
-        await this.restore();
-        result = "restore";
+        const restoreResult = await this.restore();
+        result = {
+          action: 'restore',
+          probe: 'indeterminate',
+          restoredKeys: restoreResult.restoredKeys.length,
+          restoreFailedKeys: restoreResult.failedKeys.length,
+          probeReason: probe.reason,
+        };
       } else {
         Log.info('Ganon: No remote data detected on login - backing up local guest state');
         await this.backup();
-        result = "backup";
+        result = { action: 'backup', probe: 'absent', restoredKeys: 0, restoreFailedKeys: 0 };
       }
 
       if (this.resolvedConfig.autoStartSync) {
@@ -517,13 +530,11 @@ export default class Ganon<T extends Record<string, any> & BaseStorageMapping> i
         await this.backup();
       }
     } finally {
-      // Settle waiters before stopSync so logout resolves 'logged-out', not 'stopped'.
       if (this._isHydrationPending()) {
         this._settleHydrationWaiters('logged-out');
       }
-      // Stop sync and cancel pending operations
       this.stopSync();
-      this.syncEngine.cancelPendingOperations();
+      await this.syncEngine.cancelPendingOperations();
       this._resetHydrationCycle();
 
       // Clear all data

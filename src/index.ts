@@ -15,6 +15,7 @@ export type { BackupResult } from './models/sync/BackupResult';
 export type { RestoreResult, IntegrityFailureInfo } from './models/sync/RestoreResult';
 export type { RemoteDataProbeResult } from './models/sync/RemoteDataProbeResult';
 export type { HydrationWaitReason } from './models/sync/HydrationWaitReason';
+export type { LoginResult, LoginAction, LoginProbeStatus } from './models/sync/LoginResult';
 export type { IGanon } from './models/interfaces/IGanon';
 export type {
   GanonEventName,

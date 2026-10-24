@@ -76,7 +76,8 @@ describe('SyncEngine Tests', () => {
       getRemoteMetadataOnly: jest.fn(),
       getRemoteMetaForKey: jest.fn().mockReturnValue(undefined),
       invalidateCache: jest.fn(),
-      invalidateCacheForHydration: jest.fn()
+      invalidateCacheForHydration: jest.fn(),
+      cancelPendingOperations: jest.fn(),
     } as any;
     mockMetadataManager.isNeverSynced = jest.fn((key: string) => {
       const meta = mockMetadataManager.get(key as keyof TestStorage);
@@ -85,11 +86,12 @@ describe('SyncEngine Tests', () => {
 
     mockOperationRepo = {
       addOperation: jest.fn(),
-      processOperations: jest.fn()
+      processOperations: jest.fn(),
+      clearAll: jest.fn(),
     } as any;
 
     mockUserManager = {
-      getCurrentUser: jest.fn(),
+      getCurrentUser: jest.fn().mockReturnValue('test@example.com'),
       isUserLoggedIn: jest.fn().mockReturnValue(true),
       login: jest.fn(),
       logout: jest.fn()
@@ -1209,7 +1211,13 @@ describe('SyncEngine Tests', () => {
     it('should restore data from cloud successfully', async () => {
       // Setup test data
       const remoteValue = 'remote value';
+      const remoteVersion = 1_700_000_000_000;
+      const computeHash = require('../../utils/computeHash').default;
       mockFirestore.fetch.mockResolvedValue(remoteValue);
+      mockMetadataManager.getRemoteMetadataOnly.mockResolvedValue({
+        digest: 'remote-digest-ignored',
+        version: remoteVersion,
+      });
 
       // Execute restore
       const result = await syncEngine.restore();
@@ -1219,6 +1227,43 @@ describe('SyncEngine Tests', () => {
       expect(result.restoredKeys).toContain('testKey');
       expect(result.failedKeys).toHaveLength(0);
       expect(mockStorage.set).toHaveBeenCalledWith('testKey', remoteValue);
+      // Digest recomputed locally; version copied from remote (not Date.now())
+      expect(mockMetadataManager.set).toHaveBeenCalledWith('testKey', {
+        syncStatus: SyncStatus.Synced,
+        digest: computeHash(remoteValue),
+        version: remoteVersion,
+      }, false);
+    });
+
+    it('restore seeds version 0 when remote metadata is missing (fail toward re-hydrate, not clobber)', async () => {
+      const remoteValue = 'orphaned-value';
+      const computeHash = require('../../utils/computeHash').default;
+      mockFirestore.fetch.mockResolvedValue(remoteValue);
+      mockMetadataManager.getRemoteMetadataOnly.mockResolvedValue(undefined);
+
+      const result = await syncEngine.restore();
+
+      expect(result.success).toBe(true);
+      expect(mockMetadataManager.set).toHaveBeenCalledWith('testKey', {
+        syncStatus: SyncStatus.Synced,
+        digest: computeHash(remoteValue),
+        version: 0,
+      }, false);
+    });
+
+    it('restore on an empty remote returns success with nothing restored (real fetch→undefined path)', async () => {
+      // Genuinely-fresh / empty cloud: every key fetch resolves undefined. This is the REAL
+      // restore path that the Ganon-level indeterminate tests mock at the syncController
+      // boundary — it must not throw, must not write, and must report success with 0 keys.
+      mockFirestore.fetch.mockResolvedValue(undefined);
+
+      const result = await syncEngine.restore();
+
+      expect(result.success).toBe(true);
+      expect(result.restoredKeys).toHaveLength(0);
+      expect(result.failedKeys).toHaveLength(0);
+      expect(mockStorage.set).not.toHaveBeenCalled();
+      expect(mockMetadataManager.set).not.toHaveBeenCalled();
     });
 
     it('should handle restore failures gracefully', async () => {
@@ -1232,6 +1277,50 @@ describe('SyncEngine Tests', () => {
       expect(result.success).toBe(false);
       expect(result.failedKeys).toContain('testKey');
       expect(result.restoredKeys).toHaveLength(0);
+    });
+
+    it('after restore, syncAll marks zero keys when values are untouched (digest invariant)', async () => {
+      // Encodes the invariant the digest system exists for: restore leaves the engine
+      // believing local == remote. Without seeding digests on restore, every logout
+      // re-uploads all restored keys (stale-clobber risk on multi-device).
+      const computeHash = require('../../utils/computeHash').default;
+      const remoteByKey: Record<string, unknown> = {
+        testKey: 'restored-test',
+        anotherKey: 99,
+      };
+
+      mockFirestore.fetch.mockImplementation(async (key: string) => remoteByKey[key]);
+      mockMetadataManager.getRemoteMetaForKey.mockImplementation((key: string) => ({
+        d: 'remote-ignored',
+        v: key === 'testKey' ? 111 : 222,
+      }));
+
+      // Track seeded digests so get() reflects restore's metadata writes
+      const seeded = new Map<string, LocalSyncMetadata>();
+      mockMetadataManager.recordSyncedState.mockImplementation(async (key: string, metadata: LocalSyncMetadata) => {
+        seeded.set(key, metadata);
+      });
+      mockMetadataManager.get.mockImplementation((key: string) => seeded.get(key));
+
+      const result = await syncEngine.restore();
+      expect(result.success).toBe(true);
+      expect(result.restoredKeys).toEqual(expect.arrayContaining(['testKey', 'anotherKey']));
+      expect(seeded.get('testKey')?.digest).toBe(computeHash(remoteByKey.testKey));
+      expect(seeded.get('anotherKey')?.digest).toBe(computeHash(remoteByKey.anotherKey));
+      expect(seeded.get('testKey')?.version).toBe(111);
+      expect(seeded.get('anotherKey')?.version).toBe(222);
+
+      mockStorage.contains.mockImplementation((key: string) => key in remoteByKey);
+      mockStorage.get.mockImplementation((key: string) => remoteByKey[key] as any);
+      mockOperationRepo.addOperation.mockClear();
+      mockOperationRepo.processOperations.mockResolvedValue([]);
+
+      const backup = await syncEngine.syncAll();
+
+      expect(mockOperationRepo.addOperation).not.toHaveBeenCalled();
+      expect(backup.backedUpKeys).toHaveLength(0);
+      expect(backup.failedKeys).toHaveLength(0);
+      expect(backup.skippedKeys).toEqual(expect.arrayContaining(['testKey', 'anotherKey']));
     });
   });
 
@@ -1415,7 +1504,9 @@ describe('SyncEngine Tests', () => {
       // Verify lastBackup was synced to remote
       await Promise.resolve(); // Wait for async backup promise
       expect(mockFirestore.backupLastBackupToUserDocument).toHaveBeenCalledTimes(1);
-      expect(mockFirestore.backupLastBackupToUserDocument).toHaveBeenCalledWith(expect.any(Number));
+      expect(mockFirestore.backupLastBackupToUserDocument).toHaveBeenCalledWith(expect.any(Number), {
+        ownerAtSchedule: 'test@example.com',
+      });
     });
 
     it('should not update lastBackup when no keys are successfully synced', async () => {
@@ -1447,7 +1538,9 @@ describe('SyncEngine Tests', () => {
       // Verify lastBackup was synced to remote
       await Promise.resolve(); // Wait for async backup promise
       expect(mockFirestore.backupLastBackupToUserDocument).toHaveBeenCalledTimes(1);
-      expect(mockFirestore.backupLastBackupToUserDocument).toHaveBeenCalledWith(expect.any(Number));
+      expect(mockFirestore.backupLastBackupToUserDocument).toHaveBeenCalledWith(expect.any(Number), {
+        ownerAtSchedule: 'test@example.com',
+      });
     });
 
     it('should not update lastBackup when syncAll has no successful backups', async () => {
@@ -1512,9 +1605,11 @@ describe('SyncEngine Tests', () => {
       const lastBackupCall = mockStorage.set.mock.calls.find(call => call[0] === 'lastBackup');
       const localTimestamp = lastBackupCall![1] as number;
 
-      // Verify the same timestamp was sent to remote
+      // Verify the same timestamp was sent to remote, with schedule-time owner
       await Promise.resolve(); // Wait for async backup promise
-      expect(mockFirestore.backupLastBackupToUserDocument).toHaveBeenCalledWith(localTimestamp);
+      expect(mockFirestore.backupLastBackupToUserDocument).toHaveBeenCalledWith(localTimestamp, {
+        ownerAtSchedule: 'test@example.com',
+      });
     });
 
     it('should not sync lastBackup to remote when user is not logged in', async () => {
@@ -1548,6 +1643,37 @@ describe('SyncEngine Tests', () => {
       // Verify remote backup was attempted
       await Promise.resolve(); // Wait for async backup promise
       expect(mockFirestore.backupLastBackupToUserDocument).toHaveBeenCalledTimes(1);
+    });
+
+    it('cancelPendingOperations awaits in-flight lastBackup write before clearing queues', async () => {
+      // Reproduces the logout→login interleave: syncAll finishes, _updateLastBackup
+      // starts a slow user-doc write, teardown must drain it before clearAll would run.
+      let resolveWrite!: () => void;
+      const slowWrite = new Promise<void>((resolve) => {
+        resolveWrite = resolve;
+      });
+      mockFirestore.backupLastBackupToUserDocument.mockReturnValue(slowWrite);
+      mockOperationRepo.processOperations.mockResolvedValue([{ success: true, key: 'testKey' }]);
+
+      await syncEngine.syncPending();
+      expect(mockFirestore.backupLastBackupToUserDocument).toHaveBeenCalledTimes(1);
+
+      let cancelSettled = false;
+      const cancelPromise = syncEngine.cancelPendingOperations().then(() => {
+        cancelSettled = true;
+      });
+
+      // Must not clear the op queue (or return) while the lastBackup write is still open.
+      await Promise.resolve();
+      expect(cancelSettled).toBe(false);
+      expect(mockOperationRepo.clearAll).not.toHaveBeenCalled();
+
+      resolveWrite();
+      await cancelPromise;
+
+      expect(cancelSettled).toBe(true);
+      expect(mockOperationRepo.clearAll).toHaveBeenCalledTimes(1);
+      expect(mockMetadataManager.cancelPendingOperations).toHaveBeenCalledTimes(1);
     });
   });
 
