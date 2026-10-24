@@ -74,6 +74,7 @@ describe('SyncEngine Tests', () => {
       hydrateMetadata: jest.fn(),
       needsHydration: jest.fn(),
       getRemoteMetadataOnly: jest.fn(),
+      probeRemoteTenure: jest.fn(),
       getRemoteMetaForKey: jest.fn().mockReturnValue(undefined),
       invalidateCache: jest.fn(),
       cancelPendingOperations: jest.fn(),
@@ -1172,25 +1173,24 @@ describe('SyncEngine Tests', () => {
   describe('probeRemoteData', () => {
     it('returns present when any key has remote metadata', async () => {
       mockUserManager.isUserLoggedIn.mockReturnValue(true);
-      mockMetadataManager.getRemoteMetadataOnly
-        .mockResolvedValueOnce(undefined)
-        .mockResolvedValueOnce({ digest: 'abc', version: 1 });
+      mockMetadataManager.probeRemoteTenure.mockResolvedValue({ present: true, errors: [] });
 
       await expect(syncEngine.probeRemoteData()).resolves.toEqual({ status: 'present' });
     });
 
     it('returns absent when every key is empty with no errors', async () => {
       mockUserManager.isUserLoggedIn.mockReturnValue(true);
-      mockMetadataManager.getRemoteMetadataOnly.mockResolvedValue(undefined);
+      mockMetadataManager.probeRemoteTenure.mockResolvedValue({ present: false, errors: [] });
 
       await expect(syncEngine.probeRemoteData()).resolves.toEqual({ status: 'absent' });
     });
 
     it('returns indeterminate when probe reads fail (does not collapse to absent)', async () => {
       mockUserManager.isUserLoggedIn.mockReturnValue(true);
-      mockMetadataManager.getRemoteMetadataOnly.mockRejectedValue(
-        Object.assign(new Error('denied'), { code: 'permission-denied' })
-      );
+      mockMetadataManager.probeRemoteTenure.mockResolvedValue({
+        present: false,
+        errors: ['testDoc: denied'],
+      });
 
       const result = await syncEngine.probeRemoteData();
       expect(result.status).toBe('indeterminate');

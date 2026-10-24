@@ -134,6 +134,52 @@ export default class MetadataManager<T extends BaseStorageMapping> {
    * Gets remote metadata without syncing local changes to remote.
    * This is used during hydration to avoid pushing local metadata to remote.
    */
+  /**
+   * One full remote-metadata fetch per backup document; returns present if any configured
+   * key has tenure. Avoids N keyed fetches that could warm an empty partial cache (C-F2).
+   */
+  async probeRemoteTenure(
+    configuredKeys: Extract<keyof T, string>[]
+  ): Promise<{ present: boolean; errors: string[] }> {
+    if (!this.config?.cloudConfig) {
+      return { present: false, errors: [] };
+    }
+
+    const errors: string[] = [];
+    const keySet = new Set(configuredKeys.map(String));
+
+    for (const documentName of Object.keys(this.config.cloudConfig)) {
+      const coordinator = this.coordinatorRepo.getCoordinator(documentName as Extract<keyof T, string>);
+      if (!coordinator) {
+        continue;
+      }
+
+      const docConfig = this.config.cloudConfig[documentName as keyof typeof this.config.cloudConfig];
+      const keysInDocument = [
+        ...(docConfig?.docKeys ?? []),
+        ...(docConfig?.subcollectionKeys ?? []),
+      ].filter(k => keySet.has(String(k)));
+
+      if (keysInDocument.length === 0) {
+        continue;
+      }
+
+      try {
+        const remoteMetadata = await coordinator.getRemoteMetadata();
+        for (const key of keysInDocument) {
+          if (remoteMetadata[key]) {
+            return { present: true, errors };
+          }
+        }
+      } catch (e) {
+        const reason = e instanceof Error ? e.message : String(e);
+        errors.push(`${documentName}: ${reason}`);
+      }
+    }
+
+    return { present: false, errors };
+  }
+
   async getRemoteMetadataOnly(key: Extract<keyof T, string>): Promise<SyncMetadata | undefined> {
     Log.verbose(`Ganon: MetadataManager.getRemoteMetadataOnly, key: ${String(key)}`);
     const coordinator = this._getCoordinator(key);

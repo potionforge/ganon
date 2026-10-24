@@ -104,7 +104,7 @@ export default class RemoteMetadataCache<T extends BaseStorageMapping> {
     return this.docRef;
   }
 
-  private async _doFetch(specificKeys?: string[]): Promise<void> {
+  private async _doFetch(_specificKeys?: string[]): Promise<void> {
     const fetchEpoch = this.epoch;
     const doc = await this.adapter.getDocument(this._getDocRef());
     if (fetchEpoch !== this.epoch) {
@@ -114,17 +114,10 @@ export default class RemoteMetadataCache<T extends BaseStorageMapping> {
       const docData = doc.data() ?? {};
       const legacyMetadata = (docData[REMOTE_METADATA_KEY] as MetadataStorage) || {};
       const digestMap = (docData[DIGEST_MAP_KEY] as MetadataStorage) || {};
-      const remoteMetadata = this._mergeDigestSources(legacyMetadata, digestMap, specificKeys);
-
-      if (specificKeys) {
-        for (const key of specificKeys) {
-          if (remoteMetadata[key]) {
-            this.cache.data[key] = remoteMetadata[key];
-          }
-        }
-      } else {
-        this.cache.data = remoteMetadata;
-      }
+      // Document is read in full — always warm the cache with the complete metadata map.
+      // Partial fill on keyed fetch caused false-negative probes (C-F2 / Ticket B class).
+      const remoteMetadata = this._mergeDigestSources(legacyMetadata, digestMap);
+      this.cache.data = remoteMetadata;
       this.cache.lastFetchTime = Date.now();
       this.cache.invalidated = false;
     }

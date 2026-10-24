@@ -44,6 +44,7 @@ const mockFirestoreManager: any = {
 const mockMetadataManager: any = {
   get: jest.fn(),
   getRemoteMetadataOnly: jest.fn().mockResolvedValue(undefined),
+  probeRemoteTenure: jest.fn().mockResolvedValue({ present: false, errors: [] }),
   needsHydration: jest.fn().mockResolvedValue(false),
   recordLocalChange: jest.fn().mockResolvedValue(undefined),
   persistLocalChange: jest.fn().mockResolvedValue(undefined),
@@ -214,7 +215,7 @@ describe('Ganon auth lifecycle (unmocked SyncEngine)', () => {
 
   it('login failure settles pre-registered waiters as login-failed and unblocks earlyWriteGuard', async () => {
     const ganon = new Ganon<TestStorage>({ ...baseConfig, earlyWriteGuard: 'throw' });
-    mockMetadataManager.getRemoteMetadataOnly.mockResolvedValue({ digest: 'd', version: 1 });
+    mockMetadataManager.probeRemoteTenure.mockResolvedValue({ present: true, errors: [] });
     jest.spyOn(realSyncEngine, 'restore').mockRejectedValue(new Error('restore failed'));
 
     let reason: string | undefined;
