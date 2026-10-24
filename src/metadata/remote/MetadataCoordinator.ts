@@ -293,18 +293,8 @@ export default class MetadataCoordinator<T extends BaseStorageMapping> {
       if (doc.exists) {
         const remoteMetadata = doc.data()?.[REMOTE_METADATA_KEY] || {};
 
-        if (specificKeys) {
-          // Only update cache for specific keys
-          for (const key of specificKeys) {
-            if (remoteMetadata[key]) {
-              this.cache.data[key] = remoteMetadata[key];
-            }
-          }
-        } else {
-          // Full cache refresh
-          this.cache.data = remoteMetadata;
-        }
-
+        // Document is read in full — always warm the cache with the complete map (C-F2).
+        this.cache.data = remoteMetadata;
         this.cache.lastFetchTime = Date.now();
       }
     } catch (error) {
