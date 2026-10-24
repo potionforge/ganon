@@ -39,8 +39,11 @@ class SyncError extends Error {
       (this as Error & { cause?: unknown }).cause = options.cause;
     }
 
-    if (Error.captureStackTrace) {
-      Error.captureStackTrace(this, SyncError);
+    const captureStackTrace = (Error as ErrorConstructor & {
+      captureStackTrace?(target: object, constructorOpt?: Function): void;
+    }).captureStackTrace;
+    if (captureStackTrace) {
+      captureStackTrace(this, SyncError);
     }
   }
 

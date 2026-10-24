@@ -476,6 +476,15 @@ export default class Ganon<T extends Record<string, any> & BaseStorageMapping> i
       if (probe.status === 'present') {
         Log.info('Ganon: Existing remote data detected on login - restoring');
         const restoreResult = await this.restore();
+        if (restoreResult.aborted) {
+          // stopSync() mid-login wins: sync stays stopped; never countermand an interleaved stop.
+          return {
+            action: 'restore',
+            probe: 'present',
+            restoredKeys: restoreResult.restoredKeys.length,
+            restoreFailedKeys: restoreResult.failedKeys.length,
+          };
+        }
         result = {
           action: 'restore',
           probe: 'present',

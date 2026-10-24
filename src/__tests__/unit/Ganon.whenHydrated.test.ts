@@ -30,7 +30,7 @@ const mockSyncEngine: any = {
   start: jest.fn(),
   stop: jest.fn(),
   stopSyncInterval: jest.fn(),
-  cancelPendingOperations: jest.fn(),
+  cancelPendingOperations: jest.fn().mockResolvedValue(undefined),
   syncAll: jest.fn().mockResolvedValue({
     success: true,
     backedUpKeys: [],
@@ -215,7 +215,7 @@ describe('Ganon whenHydrated lifecycle', () => {
     await Promise.resolve();
 
     expect(() => ganon.set('settings', { theme: 'dark' })).toThrow(SyncError);
-    await expect(loginPromise).resolves.toBe('restore');
+    await expect(loginPromise).resolves.toMatchObject({ action: 'restore' });
   });
 
   it('resolves whenHydrated waiters when hydrate rejects after onHydrationComplete', async () => {
@@ -265,7 +265,7 @@ describe('Ganon whenHydrated lifecycle', () => {
       });
     });
 
-    await expect(ganon.login('u1')).resolves.toBe('restore');
+    await expect(ganon.login('u1')).resolves.toMatchObject({ action: 'restore' });
     await expect(ganon.whenHydrated()).resolves.toBe('hydrated');
   });
 

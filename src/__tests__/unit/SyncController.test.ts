@@ -1214,9 +1214,9 @@ describe('SyncEngine Tests', () => {
       const remoteVersion = 1_700_000_000_000;
       const computeHash = require('../../utils/computeHash').default;
       mockFirestore.fetch.mockResolvedValue(remoteValue);
-      mockMetadataManager.getRemoteMetadataOnly.mockResolvedValue({
-        digest: 'remote-digest-ignored',
-        version: remoteVersion,
+      mockMetadataManager.getRemoteMetaForKey.mockReturnValue({
+        d: 'remote-digest-ignored',
+        v: remoteVersion,
       });
 
       // Execute restore
@@ -1228,27 +1228,27 @@ describe('SyncEngine Tests', () => {
       expect(result.failedKeys).toHaveLength(0);
       expect(mockStorage.set).toHaveBeenCalledWith('testKey', remoteValue);
       // Digest recomputed locally; version copied from remote (not Date.now())
-      expect(mockMetadataManager.set).toHaveBeenCalledWith('testKey', {
+      expect(mockMetadataManager.recordSyncedState).toHaveBeenCalledWith('testKey', {
         syncStatus: SyncStatus.Synced,
         digest: computeHash(remoteValue),
         version: remoteVersion,
-      }, false);
+      });
     });
 
     it('restore seeds version 0 when remote metadata is missing (fail toward re-hydrate, not clobber)', async () => {
       const remoteValue = 'orphaned-value';
       const computeHash = require('../../utils/computeHash').default;
       mockFirestore.fetch.mockResolvedValue(remoteValue);
-      mockMetadataManager.getRemoteMetadataOnly.mockResolvedValue(undefined);
+      mockMetadataManager.getRemoteMetaForKey.mockReturnValue(undefined);
 
       const result = await syncEngine.restore();
 
       expect(result.success).toBe(true);
-      expect(mockMetadataManager.set).toHaveBeenCalledWith('testKey', {
+      expect(mockMetadataManager.recordSyncedState).toHaveBeenCalledWith('testKey', {
         syncStatus: SyncStatus.Synced,
         digest: computeHash(remoteValue),
         version: 0,
-      }, false);
+      });
     });
 
     it('restore on an empty remote returns success with nothing restored (real fetch→undefined path)', async () => {
