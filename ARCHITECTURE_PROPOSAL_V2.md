@@ -1,8 +1,8 @@
-# Ganon Architecture Proposal — Revised (v2.5)
+# Ganon Architecture Proposal — Revised (v2.6)
 
 **Status:** Replaces `ARCHITECTURE_PROPOSAL.md` (referred to below as "the old proposal").
 **Grounding:** Every claim below was verified against the current source of `@potionforge/ganon`
-(`src/`, ~8,200 lines) as of July 2026. Where production usage validates an invariant or
+(`src/`, ~8,200 lines) as of October 2026 (`beta-7` / `1.0.0-beta.7`). Where production usage validates an invariant or
 extension point, a production consumer is cited as *evidence only* — not as a dependency of
 this plan. LetThemGo-specific rollout, gates, and adoption work live in `LTG_ADOPTION.md`.
 
@@ -11,7 +11,10 @@ login-cycle APIs, §8 gates. v2.2 — §8 decisions recorded (Q1–Q6); step 6 t
 measurable rollout gate; steps 4–5 and 8 unblocked. v2.3 — Q5 stash-merge contract;
 step 6 sub-step 2 acceptance criteria + kill-switch. v2.4 — consumer separation; adoption
 content extracted to `LTG_ADOPTION.md`. v2.5 — step 7 vocabulary constraint; multi-backend
-deferral recorded in §7.
+deferral recorded in §7. v2.6 — §6 migration status column (shipped vs open); I10/I11
+(Ticket B + session teardown); §4.6 `LoginResult` / `HydrationWaitReason`; Q7
+`CACHE_SEMANTICS.md` merged; step 7 acceptance greps recorded; D9 restore gap marked
+shipped.
 
 ---
 
@@ -131,10 +134,12 @@ protocol does.
   mentions: `Ganon._shouldSyncKey` (`src/Ganon.ts:508-513`), `MetadataManager`'s
   `keyToDocumentMap` (`src/metadata/MetadataManager.ts:179-213`), and
   `FirestoreReferenceManager._processByKey` (`src/firestore/ref/FirestoreReferenceManager.ts:148-163`).
-- `restore()` writes fetched values to storage but never updates local metadata digests
-  (`src/sync/SyncController.ts:377-386`), so the next `syncAll()` sees hash mismatches on every
-  restored key and re-uploads all of them. **Resolved (§8 Q2):** bug — step 5 ships; restore
-  should leave the device `Synced`.
+- ~~`restore()` writes fetched values to storage but never updates local metadata digests~~
+  **Shipped (step 5):** restore seeds local digests via `recordSyncedState` so post-restore
+  `syncAll()` can skip untouched keys. Guarded by
+  `src/__tests__/integration/Restore.integration.test.ts` (restore → zero pending ops) and
+  `SyncController.test.ts` restore digest invariant; also
+  `beta62.fakeFirestore.integration.test.ts` on the FakeFirestore stack.
 
 ---
 
@@ -155,6 +160,8 @@ Convention-enforced invariants are the highest-value redesign targets.
 | **I7** | `version` is a wall-clock `Date.now()` timestamp used as the logical clock for hydration ordering and `LAST_MODIFIED_WINS` (`src/sync/SyncController.ts:237`, `src/sync/operations/SetOperation.ts:50`, `src/sync/ConflictResolver.ts:70-77`, `src/metadata/remote/MetadataCoordinator.ts:348-352`). | Everywhere, uniformly. | **Convention** — clock-skew-fragile. **Resolved (§8 Q1):** adopt `max(Date.now(), lastKnownVersion + 1)` in step 4. |
 | **I8** | Only keys listed in `cloudConfig` ever sync, and only while a user is logged in. Local writes always succeed regardless of cloud state; sync failure only flips `syncStatus`. | `Ganon.set` gates on `_shouldSyncKey` + `isUserLoggedIn` (`src/Ganon.ts:129-138`, `:503-514`); every `FirestoreManager` op re-checks login; `SetOperation` failure path only sets `SyncStatus.Failed` (`src/sync/operations/SetOperation.ts:63-69`). | **Structural** (one of the few). Preserve it. |
 | **I9** | Reserved keys don't collide with user keys: `'_sync_metadata_'` lives in the *same* MMKV namespace as user data (`src/constants.ts:4`, `src/metadata/local/LocalMetadataManager.ts:90-96`); pending operations live in a separate instance `'ganon_operations'` (`src/sync/OperationRepo.ts:15,47`). | Nothing validates that a consumer's `StorageMapping` doesn't declare `_sync_metadata_`. | **Convention.** |
+| **I10** | Remote probe errors ≠ absent cloud. The destructive backup arm (`syncAll` with writes) must **never** run on an indeterminate probe; `login()` returns **facts** (`LoginResult`), not policy. | `RemoteDataProbeResult` discriminates `present` / `absent` / `indeterminate` (`src/models/sync/RemoteDataProbeResult.ts:9-12`). `Ganon.login` branches on `probe.status` and refuses backup when `indeterminate`, attempting restore instead (`src/Ganon.ts:473-501`). `LoginResult.probe` mirrors probe status (`src/models/sync/LoginResult.ts:20-32`). | **Structural** — mistaking indeterminate for absent requires ignoring the discriminated probe type. |
+| **I11** | No remote write scheduled in session A may complete after `clearAllData`, or land under session B's identity. | `SyncEngine.cancelPendingOperations` drains in-flight work including `lastBackup` user-doc backup (`src/sync/SyncEngine.ts`); `_updateLastBackup` passes `ownerAtSchedule` into `backupLastBackupToUserDocument` with a pre-write identity check (`src/firestore/FirestoreManager.ts:852-867`, call site `src/sync/SyncEngine.ts:1111-1114`). `UserManager.getCurrentUser()` re-reads storage each call (`src/managers/UserManager.ts:20-22`), matching `isUserLoggedIn()`. | **Structural** (as of beta.7). **Guards:** `src/__tests__/integration/beta62.fakeFirestore.integration.test.ts` (three cases: restore digest skip, cancel drain, ownerAtSchedule skip on identity switch). |
 
 ---
 
@@ -375,14 +382,26 @@ Changes:
 
 ### 4.6 Public API surface
 
-Unchanged for consumers, with additions that give structural help for I1 and step 6 rollout.
-Both hydration helpers are **login-cycle-aware** — a cold start while logged out must not
-resolve/trigger as if hydration were complete.
+Core read/write/sync APIs unchanged. Step 8 additions are **shipped** unless marked *planned*.
+Hydration helpers are **login-cycle-aware** — a cold start while logged out must not resolve as
+if hydration were complete. `whenHydrated()` waiters are keyed by `hydrationCycle` on `Ganon`
+(`src/Ganon.ts:37-38`, `:207-209`, `:647-653`); remote→local restore paths in `SyncEngine` use
+`HydrationSession` generation guards (`src/sync/HydrationSession.ts:6-24`, `:1274+`).
 
 ```ts
 class Ganon<T> {
   // existing: get/set/remove/upsert/contains, backup/restore/hydrate/forceHydrate,
-  // login/logout, on/off/once, startSync/stopSync, clearAllData, destroy ...
+  // logout, on/off/once, startSync/stopSync, clearAllData, destroy ...
+
+  /**
+   * Login cycle (I10). Returns facts, not policy — caller decides how to handle
+   * `probe: 'indeterminate'` vs `'present'` / `'absent'`.
+   * (`src/models/sync/LoginResult.ts`, `src/Ganon.ts:447-501`.)
+   */
+  login(userId: string): Promise<LoginResult>;
+  // LoginResult: { action: 'noop' | 'restore' | 'backup';
+  //   probe: 'present' | 'absent' | 'indeterminate' | 'skipped';
+  //   restoredKeys; restoreFailedKeys; probeReason? }
 
   /** Read with an in-memory default. NEVER persists the default. (I1 as API, not comment.) */
   getOrDefault<K extends KeyOf<T>>(key: K, fallback: T[K]): T[K];
@@ -395,12 +414,14 @@ class Ganon<T> {
    * - On `login()`: returns a fresh pending promise; prior awaiters from a previous
    *   session are cancelled/superseded.
    * - On `logout()`: resets; next cycle starts pending again.
-   * - Resolves on `hydrationComplete` for the current cycle (including zero keys restored).
+   * - Resolves on `hydrationComplete` for the current cycle (including zero keys restored),
+   *   with a `HydrationWaitReason`: `'hydrated' | 'logged-out' | 'login-failed' | 'stopped'`
+   *   (`src/models/sync/HydrationWaitReason.ts`, `src/Ganon.ts:185-210`.)
    *
    * Managers gate cloud-synced writes: `await ganon.whenHydrated()` after login, not at
    * module init on a cold guest start.
    */
-  whenHydrated(): Promise<void>;
+  whenHydrated(): Promise<HydrationWaitReason>;
 
   /**
    * Dev-mode guard (opt-in). Warns/throws when a cloud-configured key is written during
@@ -413,6 +434,13 @@ class Ganon<T> {
    * config: { earlyWriteGuard?: 'off' | 'warn' | 'throw';
    *           digestReadMode?: 'legacy' | 'dual' | 'v2' }  // see §6 step 6
    */
+
+  /** *Planned* (step 8 follow-on / #35 ordering residual): synchronous hydration phase for
+   *  managers that must not await but need to know pending vs settled. */
+  // getHydrationState(): 'pending' | 'hydrated' | ...
+
+  /** *Planned* (step 8 follow-on): `set` variant that updates local storage only — no
+   *  sync scheduling — for consumer-side merges that must not author cloud writes. */
 }
 ```
 
@@ -477,25 +505,37 @@ the PR. Order matters: testability first, so every later step lands with tests.
 
 ### Prerequisites (§8 resolved)
 
-Blocking questions Q2, Q4, Q5 are answered in §8. **Steps 4–5 and 8 are unblocked.**
-Step 6 sub-step 2 remains gated until the **deploying consumer** confirms fleet coverage per
-its adoption plan (abstract dual-signal criterion — capability stamp plus write-path analytics;
-concrete thresholds are consumer-specific; see `LTG_ADOPTION.md` for one reference plan).
-Order unchanged: **steps 1–3 first** so step 4+ lands with the fake stack underneath.
+Blocking questions Q2, Q4, Q5 are answered in §8. Step 6 sub-step 2 remains gated until the
+**deploying consumer** confirms fleet coverage per its adoption plan (abstract dual-signal
+criterion — capability stamp plus write-path analytics; concrete thresholds are
+consumer-specific; see `LTG_ADOPTION.md` for one reference plan).
+
+| Step | Status | Ship ref / notes |
+|---|---|---|
+| **1** | **Shipped** | `5a5d1dc` — `KeyValueStore`, `Clock`, `Scheduler` ports |
+| **2** | **Shipped** | `65751f7`, `bc077b5` — `FakeFirestore`, injected Firestore handle |
+| **3** | **Shipped** | `4b50e1d`, `8f91a5d` — `KeyRouter`, reserved-key validation |
+| **4** | **Shipped** | `60eb48e` (on main via PR #12 / `e42f98d`) — metadata split, monotonic version |
+| **5** | **Shipped** | `60eb48e`, `2b819b7` — restore digests; tests in `Restore.integration.test.ts`, `SyncController.test.ts`, `beta62.fakeFirestore.integration.test.ts` |
+| **6.1** | **Shipped** | `717cb82` — dual-write + higher-`v` read (`digestReadMode: 'dual'`) |
+| **6.2** | **Open** | Stop reading legacy map — fleet gate (above) |
+| **6.3** | **Open** | Stop writing legacy map; shrink integrity recovery |
+| **7** | **Shipped** (rename) | `60eb48e` — `SyncController` → `SyncEngine`; 6.2 session fixes on v2 paths — merge `26e63fb`, integration tests `fc1bb72`. **Open:** step 7 audit item 3 (see below) |
+| **8** | **Shipped** (core) | `60eb48e` — `getOrDefault`, `whenHydrated`, `earlyWriteGuard`, `digestReadMode`. **Open:** `getHydrationState()`, non-authoring `set` (§4.6) |
 
 ---
 
-1. **Inject `KeyValueStore` + `Clock`/`Scheduler`** into `StorageManager`, `OperationRepo`,
-   `SyncController`, `MetadataCoordinator`, `ChunkManager`, with production defaults
+1. **Status: shipped** (`5a5d1dc`). **Inject `KeyValueStore` + `Clock`/`Scheduler`** into
+   `StorageManager`, `OperationRepo`, `SyncController`, `MetadataCoordinator`, `ChunkManager`, with production defaults
    (`new MMKV()`, real timers). Wire `MMKVFaker` into the test suite; delete the jest MMKV
    module mock. *No behavior change; revert = revert.*
-2. **Build `FakeFirestore`; inject the Firestore handle** into `FirestoreAdapter` /
+2. **Status: shipped** (`65751f7`, `bc077b5`). **Build `FakeFirestore`; inject the Firestore handle** into `FirestoreAdapter` /
    `FirestoreReferenceManager`; collapse the duplicate reference-manager instances (D6).
    Land the `SyncEngine`-level characterization tests (current behavior, bugs and all) —
    these are the safety net for everything after.
-3. **Extract `KeyRouter`;** delete the three duplicated lookups; add reserved-key validation to
+3. **Status: shipped** (`4b50e1d`, `8f91a5d`). **Extract `KeyRouter`;** delete the three duplicated lookups; add reserved-key validation to
    `_validateConfig`. *Pure refactor guarded by step-2 tests.*
-4. **Split the metadata subsystem** (§4.3): `MetadataStore` / `RemoteMetadataCache` /
+4. **Status: shipped** (`60eb48e`). **Split the metadata subsystem** (§4.3): `MetadataStore` / `RemoteMetadataCache` /
    `MetadataFlushQueue`; replace the `scheduleRemoteSync` boolean with
    `recordLocalChange`/`recordSyncedState`; route all config through resolved `GanonConfig`
    (fixes D7 — per §8 Q4); make `invalidate()` lazy (fixes the N-fetch hydration).
@@ -503,12 +543,12 @@ Order unchanged: **steps 1–3 first** so step 4+ lands with the fake stack unde
    `version = max(Date.now(), lastKnownVersion + 1)` wherever a new version is stamped.
    `MetadataManager` façade keeps its public signatures so `SyncController` and `OperationRepo`
    diffs stay small.
-5. **Fix restore's metadata gap** (D9) — per §8 Q2: **bug, ships.** Restore's per-key
+5. **Status: shipped** (`60eb48e`, `2b819b7`). **Fix restore's metadata gap** (D9) — per §8 Q2. Restore's per-key
    success path calls `recordSyncedState(key, {digest, version})` so the device is left
    `Synced`, not pending re-upload. *Ship separately from step 4.*
    **PR verification required:** confirm no path relies on the post-restore re-upload as a
    safety net for partial restore failures.
-6. **Atomic data+digest writes** — ⚠️ **touches persisted data format.**
+6. **Status: 6.1 shipped** (`717cb82`); **6.2–6.3 open.** **Atomic data+digest writes** — ⚠️ **touches persisted data format.**
 
    *Forward-compatibility story:* **dual-write, higher-version-wins-read.**
 
@@ -551,7 +591,7 @@ Order unchanged: **steps 1–3 first** so step 4+ lands with the fake stack unde
    Reverting any sub-step restores the previous read/write mix without data loss because both
    locations stay populated through the transition.
 
-7. **Slim `SyncController` into `SyncEngine`:** constructor side effects out (interval start and
+7. **Status: shipped** (rename, `60eb48e`); audit cleanup **partially open** (below). **Slim `SyncController` into `SyncEngine`:** constructor side effects out (interval start and
    auto-hydration move behind explicit `start()` called from `Ganon`), hydration pipeline
    decomposed into policy functions. Public `Ganon` behavior unchanged.
 
@@ -597,21 +637,32 @@ Order unchanged: **steps 1–3 first** so step 4+ lands with the fake stack unde
       `chunk`, and `@react-native-firebase/firestore` / `firebase/firestore` imports; eliminate
       or push each hit behind `FirestoreManager`.
 
-   **PR acceptance (mechanical):** two greps, both must return zero matches under `src/sync/`
-   after the rename:
+   **PR acceptance (mechanical):** two greps under `src/sync/` — recorded on `beta-7` @
+   `9e35313` (October 2026):
 
    ```bash
-   rg '@react-native-firebase/firestore|firebase/firestore' src/sync/
-   rg 'FirebaseFirestore|DocumentReference|CollectionReference|WriteBatch|runTransaction|\{ transaction' src/sync/
+   $ rg '@react-native-firebase/firestore|firebase/firestore' src/sync/
+   # (no matches)
+
+   $ rg 'FirebaseFirestore|DocumentReference|CollectionReference|WriteBatch|runTransaction|\{ transaction' src/sync/
+   # (no matches)
    ```
+
+   **Residual vocabulary audit** (`rg 'UserDocument|userDoc|getUserRef' src/sync/`):
+
+   | Location | Verdict |
+   |---|---|
+   | `src/sync/SyncEngine.ts:1114` — `.backupLastBackupToUserDocument(...)` | **Open** (audit item 3): engine calls a Firestore-shaped method name; rename to an intent on `FirestoreManager` (e.g. `recordBackupTimestamp`) deferred to a follow-up PR |
 
    The engine may still depend on `FirestoreManager` as a concrete class — only Firestore
    *vocabulary* is excluded, not the dependency itself.
 
-8. **Public API additions** — ship `getOrDefault`, login-cycle `whenHydrated`, opt-in
-   login-cycle `earlyWriteGuard`, and `digestReadMode` (§6 step 6). Document §8 Q5 contract
-   in Ganon README. Consumer adoption (guard rollout, manager migration, stash-merge tests)
-   is tracked per consumer — see `LTG_ADOPTION.md` for the reference plan.
+8. **Status: shipped** (core, `60eb48e`); **open:** `getHydrationState()`, non-authoring `set`
+   (§4.6). **Public API additions** — `getOrDefault`, login-cycle `whenHydrated` (returns
+   `HydrationWaitReason`), opt-in `earlyWriteGuard`, and `digestReadMode` (§6 step 6).
+   Document §8 Q5 contract in Ganon README. Consumer adoption (guard rollout, manager
+   migration, stash-merge tests) is tracked per consumer — see `LTG_ADOPTION.md` for the
+   reference plan.
 
 Steps 1–3, 7 touch no persisted bytes locally or remotely. Step 6 is the only format-touching
 step and is flagged accordingly. There is no step at which old and new library versions must
@@ -740,8 +791,8 @@ Resolved decision and action item: `LTG_ADOPTION.md` §Q6.
 
 ### Q7 — Per-site metadata cache freshness: **preserve; do not invent “keys = bypass”**
 
-beta-6.2 wrote down the call-site freshness contract in `CACHE_SEMANTICS.md` (on that
-branch; port alongside any restore-digest / cache work brought forward). Summary:
+The call-site freshness contract lives in `CACHE_SEMANTICS.md` (merged on main with
+`8f54df9` / beta-6.2). Summary:
 
 - TTL-warm cache serves **all** readers, including keyed `getRemoteMetadataOnly`.
 - Sites that need fresher-than-TTL (hydrate / forceHydrate first reads, integrity
