@@ -2,9 +2,16 @@
  * Step 5 acceptance: restore leaves device synced; no per-key metadata refetch.
  */
 import SyncEngine from '../../sync/SyncEngine';
-import MetadataManager from '../../metadata/MetadataManager';
+import { GanonConfig } from '../../models/config/GanonConfig';
+import { BaseStorageMapping } from '../../models/storage/BaseStorageMapping';
 import { SyncStatus } from '../../models/sync/SyncStatus';
 import computeHash from '../../utils/computeHash';
+
+interface RestoreTestStorage extends BaseStorageMapping {
+  userId: string;
+  key1: string;
+  key2: string;
+}
 
 describe('Restore integration (step 5)', () => {
   it('restore then syncAll produces zero pending operations', async () => {
@@ -42,19 +49,21 @@ describe('Restore integration (step 5)', () => {
       getCurrentUser: jest.fn().mockReturnValue('user-1'),
     };
 
+    const config: GanonConfig<RestoreTestStorage> = {
+      identifierKey: 'userId',
+      cloudConfig: {
+        profile: { docKeys: ['key1'], subcollectionKeys: [] },
+      },
+      autoStartSync: false,
+    };
+
     const syncEngine = new SyncEngine(
       mockStorage as any,
       mockFirestore as any,
       mockMetadataManager as any,
       mockOperationRepo as any,
       mockUserManager as any,
-      {
-        identifierKey: 'userId',
-        cloudConfig: {
-          profile: { docKeys: ['key1'], subcollectionKeys: [] },
-        },
-        autoStartSync: false,
-      }
+      config
     );
 
     const restoreResult = await syncEngine.restore();
@@ -84,17 +93,19 @@ describe('Restore integration (step 5)', () => {
       isNeverSynced: jest.fn(),
     };
 
+    const config: GanonConfig<RestoreTestStorage> = {
+      identifierKey: 'userId',
+      cloudConfig: { profile: { docKeys: ['key1', 'key2'], subcollectionKeys: [] } },
+      autoStartSync: false,
+    };
+
     const syncEngine = new SyncEngine(
       { get: jest.fn(), set: jest.fn(), remove: jest.fn(), contains: jest.fn(), clearAllData: jest.fn() } as any,
       { fetch: jest.fn().mockResolvedValue('value'), cloudConfig: {} } as any,
       metadataManager as any,
       { addOperation: jest.fn(), processOperations: jest.fn().mockResolvedValue([]) } as any,
       { isUserLoggedIn: () => true, getCurrentUser: () => 'u1' } as any,
-      {
-        identifierKey: 'userId',
-        cloudConfig: { profile: { docKeys: ['key1', 'key2'], subcollectionKeys: [] } },
-        autoStartSync: false,
-      }
+      config
     );
 
     await syncEngine.restore();
