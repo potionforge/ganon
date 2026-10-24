@@ -30,7 +30,7 @@ const mockSyncEngine: any = {
   start: jest.fn(),
   stop: jest.fn(),
   stopSyncInterval: jest.fn(),
-  cancelPendingOperations: jest.fn().mockResolvedValue(undefined),
+  cancelPendingOperations: jest.fn().mockResolvedValue(undefined as void),
   syncAll: jest.fn().mockResolvedValue({
     success: true,
     backedUpKeys: [],
@@ -43,12 +43,14 @@ const mockSyncEngine: any = {
     restoredKeys: ['settings'],
     failedKeys: [],
     integrityFailures: [],
+    timestamp: new Date(),
   }),
   hydrate: jest.fn().mockResolvedValue({
     success: true,
     restoredKeys: [],
     failedKeys: [],
     integrityFailures: [],
+    timestamp: new Date(),
   }),
   hasAnyRemoteData: jest.fn(),
   probeRemoteData: jest.fn(),
@@ -618,12 +620,7 @@ describe('Ganon whenHydrated lifecycle', () => {
       integrityFailures: [],
     });
 
-    let startCount = 0;
     mockSyncEngine.start.mockImplementation(() => {
-      startCount += 1;
-      if (startCount === 1) {
-        return;
-      }
       capturedInternalConfig?.eventCallbacks?.onHydrationComplete?.({
         success: true,
         restoredKeys: [],
@@ -632,16 +629,19 @@ describe('Ganon whenHydrated lifecycle', () => {
       });
     });
 
-    void ganon.login('u1');
+    const loginPromise = ganon.login('u1');
     await Promise.resolve();
 
     const stoppedWaiter = ganon.whenHydrated();
     ganon.stopSync();
     await expect(stoppedWaiter).resolves.toBe('stopped');
+    await loginPromise;
+    expect(mockSyncEngine.start).not.toHaveBeenCalled();
 
     mockUserManager.getCurrentUser.mockReturnValue(undefined);
     mockStorageManager.get.mockReturnValue(undefined);
     mockUserManager.isUserLoggedIn.mockImplementation(() => mockStorageManager.get('email') != null);
+    mockSyncEngine.start.mockClear();
 
     await ganon.login('u2');
     await expect(ganon.whenHydrated()).resolves.toBe('hydrated');

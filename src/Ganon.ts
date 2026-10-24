@@ -41,6 +41,8 @@ export default class Ganon<T extends Record<string, any> & BaseStorageMapping> i
   private hydrationSettleReason: HydrationWaitReason = 'hydrated';
   /** True between stopSync() and the next start; drives resume-after-stop hydration re-arm. */
   private _syncStopped = false;
+  /** Set by stopSync(); cleared at _beginHydrationCycle() — gates login() from restarting sync after interleaved teardown. */
+  private _hydrationCycleStopRequested = false;
   private readonly resolvedConfig: ResolvedGanonConfig<T>;
 
   private readonly _listeners = new Map<
@@ -157,6 +159,7 @@ export default class Ganon<T extends Record<string, any> & BaseStorageMapping> i
     if (this._isHydrationPending()) {
       this._settleHydrationWaiters('stopped');
     }
+    this._hydrationCycleStopRequested = true;
     this._syncStopped = true;
     this.syncEngine.stop();
   }
@@ -464,6 +467,7 @@ export default class Ganon<T extends Record<string, any> & BaseStorageMapping> i
     }
 
     this._beginHydrationCycle();
+    const loginHydrationCycle = this.hydrationCycle;
 
     try {
       // Set identifier locally to mark user as logged in
@@ -476,15 +480,6 @@ export default class Ganon<T extends Record<string, any> & BaseStorageMapping> i
       if (probe.status === 'present') {
         Log.info('Ganon: Existing remote data detected on login - restoring');
         const restoreResult = await this.restore();
-        if (restoreResult.aborted) {
-          // stopSync() mid-login wins: sync stays stopped; never countermand an interleaved stop.
-          return {
-            action: 'restore',
-            probe: 'present',
-            restoredKeys: restoreResult.restoredKeys.length,
-            restoreFailedKeys: restoreResult.failedKeys.length,
-          };
-        }
         result = {
           action: 'restore',
           probe: 'present',
@@ -509,10 +504,18 @@ export default class Ganon<T extends Record<string, any> & BaseStorageMapping> i
         result = { action: 'backup', probe: 'absent', restoredKeys: 0, restoreFailedKeys: 0 };
       }
 
-      if (this.resolvedConfig.autoStartSync) {
-        this.syncEngine.start();
-      } else {
-        this._settleHydrationWaiters();
+      const stopInterleavedDuringLogin =
+        this._hydrationCycleStopRequested ||
+        (this.hydrationSettled &&
+          this.hydrationSettleReason === 'stopped' &&
+          this.hydrationCycle === loginHydrationCycle);
+
+      if (!stopInterleavedDuringLogin) {
+        if (this.resolvedConfig.autoStartSync) {
+          this.syncEngine.start();
+        } else {
+          this._settleHydrationWaiters();
+        }
       }
 
       return result;
@@ -642,6 +645,7 @@ export default class Ganon<T extends Record<string, any> & BaseStorageMapping> i
     // A fresh cycle (login or resume) clears the stopped flag so a stale value left by
     // logout()'s internal stopSync() can't make a later startSync() re-arm while running.
     this._syncStopped = false;
+    this._hydrationCycleStopRequested = false;
   }
 
   private _settleHydrationWaiters(reason: HydrationWaitReason = 'hydrated'): void {
