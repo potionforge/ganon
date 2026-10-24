@@ -19,6 +19,7 @@ export default class UserManager<T extends BaseStorageMapping> implements IUserM
    */
   getCurrentUser(): string | undefined {
     Log.verbose('Ganon: getCurrentUser');
+    this.currentUser = this.storage.get(this.identifierKey) as string | undefined;
     return this.currentUser;
   }
 

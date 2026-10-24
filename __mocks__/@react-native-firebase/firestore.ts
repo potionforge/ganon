@@ -1,6 +1,22 @@
 import { deepMerge } from '../../src/__tests__/utils/deepMerge';
 import { getFakeFromModule, getRefOwner } from '../../src/__tests__/utils/FakeFirestore';
 
+/** Minimal Timestamp for DataProcessor restore paths in integration tests. */
+export class Timestamp {
+  constructor(
+    readonly seconds: number,
+    readonly nanoseconds: number
+  ) {}
+
+  static fromDate(date: Date): Timestamp {
+    return new Timestamp(Math.floor(date.getTime() / 1000), 0);
+  }
+
+  toDate(): Date {
+    return new Date(this.seconds * 1000 + this.nanoseconds / 1e6);
+  }
+}
+
 // Define the types
 export type DocumentReference = {
   path: string;
