@@ -157,6 +157,49 @@ export default class SyncEngine<T extends BaseStorageMapping> implements ISyncEn
   }
 
   /**
+   * Shared hydration pass: pass-start metadata refresh, then key processing.
+   * Assigns {@link hydrationPromise} before any await so concurrent callers dedupe.
+   */
+  private _beginHydrationPass(
+    session: HydrationSession,
+    processKeys: () => Promise<RestoreResult>,
+    errorLogMessage: string,
+    completionLogMessage: string
+  ): Promise<RestoreResult> {
+    return (async (): Promise<RestoreResult> => {
+      try {
+        await this.metadataManager.hydrateMetadata(session);
+        if (session.isStale()) {
+          return this._abortedRestoreResult;
+        }
+
+        const result = await processKeys();
+
+        if (!session.isCurrentGeneration()) {
+          return this._abortedRestoreResult;
+        }
+
+        this.config.eventCallbacks?.onHydrationComplete?.(result);
+
+        if (this.hasPendingOperations()) {
+          Log.info(completionLogMessage);
+          this.scheduler.schedule(() => this.syncPending(), 0);
+        }
+
+        return result;
+      } catch (error) {
+        Log.error(`${errorLogMessage}: ${error}`);
+        this.config.eventCallbacks?.onHydrationComplete?.(this._emptyRestoreResult);
+        throw error;
+      } finally {
+        if (session.isCurrentGeneration()) {
+          this.hydrationPromise = null;
+        }
+      }
+    })();
+  }
+
+  /**
    * Checks if any remote metadata exists for configured keys.
    * Prefer {@link probeRemoteData} at decision points that choose backup vs restore —
    * this boolean collapses `absent` and `indeterminate` and must not drive backup.
@@ -587,8 +630,10 @@ export default class SyncEngine<T extends BaseStorageMapping> implements ISyncEn
       return this.hydrationPromise;
     }
 
-    try {
-      this.hydrationPromise = this._processKeys(async (key) => {
+    this.hydrationPromise = this._beginHydrationPass(
+      session,
+      () =>
+        this._processKeys(async (key) => {
         if (session.isStale()) {
           return false;
         }
@@ -749,34 +794,12 @@ export default class SyncEngine<T extends BaseStorageMapping> implements ISyncEn
           }
         }
         return false;
-      }, "hydrate", keys, integrityConfig, conflictConfig);
+      }, "hydrate", keys, integrityConfig, conflictConfig),
+      'Ganon: error hydrating data from Firestore',
+      'Ganon: hydration complete, triggering sync for pending operations'
+    );
 
-      const result = await this.hydrationPromise;
-
-      if (!session.isCurrentGeneration()) {
-        return this._abortedRestoreResult;
-      }
-
-      this.config.eventCallbacks?.onHydrationComplete?.(result);
-
-      // After hydration completes, trigger a sync if there are pending operations
-      if (this.hasPendingOperations()) {
-        Log.info("Ganon: hydration complete, triggering sync for pending operations");
-        this.scheduler.schedule(() => this.syncPending(), 0);
-      }
-
-      return result;
-    } catch (error) {
-      Log.error(`Ganon: error hydrating data from Firestore: ${error}`);
-      this.config.eventCallbacks?.onHydrationComplete?.(this._emptyRestoreResult);
-      throw error;
-    } finally {
-      // Only clear our own dedupe handle. A stale pass resolving late must not null out
-      // the fresh session's in-flight promise (stop() already released the stale handle).
-      if (session.isCurrentGeneration()) {
-        this.hydrationPromise = null;
-      }
-    }
+    return this.hydrationPromise;
   }
 
   /**
@@ -807,13 +830,10 @@ export default class SyncEngine<T extends BaseStorageMapping> implements ISyncEn
       return this.hydrationPromise;
     }
 
-    try {
-      this.hydrationPromise = this._processKeys(async (key) => {
-        if (session.isStale()) {
-          return false;
-        }
-        // Force cache invalidation to ensure fresh remote metadata
-        await this.metadataManager.invalidateCacheForHydration(key);
+    this.hydrationPromise = this._beginHydrationPass(
+      session,
+      () =>
+        this._processKeys(async (key) => {
         if (session.isStale()) {
           return false;
         }
@@ -945,34 +965,12 @@ export default class SyncEngine<T extends BaseStorageMapping> implements ISyncEn
           }
         }
         return false;
-      }, "force hydrate", keys, integrityConfig, conflictConfig);
+      }, "force hydrate", keys, integrityConfig, conflictConfig),
+      'Ganon: error force hydrating data from Firestore',
+      'Ganon: force hydration complete, triggering sync for pending operations'
+    );
 
-      const result = await this.hydrationPromise;
-
-      if (!session.isCurrentGeneration()) {
-        return this._abortedRestoreResult;
-      }
-
-      this.config.eventCallbacks?.onHydrationComplete?.(result);
-
-      // After hydration completes, trigger a sync if there are pending operations
-      if (this.hasPendingOperations()) {
-        Log.info("Ganon: force hydration complete, triggering sync for pending operations");
-        this.scheduler.schedule(() => this.syncPending(), 0);
-      }
-
-      return result;
-    } catch (error) {
-      Log.error(`Ganon: error force hydrating data from Firestore: ${error}`);
-      this.config.eventCallbacks?.onHydrationComplete?.(this._emptyRestoreResult);
-      throw error;
-    } finally {
-      // Only clear our own dedupe handle. A stale pass resolving late must not null out
-      // the fresh session's in-flight promise (stop() already released the stale handle).
-      if (session.isCurrentGeneration()) {
-        this.hydrationPromise = null;
-      }
-    }
+    return this.hydrationPromise;
   }
 
   /**
@@ -1452,7 +1450,6 @@ export default class SyncEngine<T extends BaseStorageMapping> implements ISyncEn
 
       // Invalidate all caches
       await this.metadataManager.invalidateCache(key);
-      await this.metadataManager.invalidateCacheForHydration(key);
 
       if (session.isStale()) {
         return { success: false, recoveryStrategy: STALE_HYDRATION_RECOVERY_STRATEGY };

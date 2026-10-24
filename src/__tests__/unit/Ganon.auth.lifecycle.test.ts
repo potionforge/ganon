@@ -52,7 +52,6 @@ const mockMetadataManager: any = {
   getRemoteMetaForKey: jest.fn(),
   invalidateCache: jest.fn(),
   invalidateAllRemoteCaches: jest.fn(),
-  invalidateCacheForHydration: jest.fn(),
   cancelPendingOperations: jest.fn(),
   isNeverSynced: jest.fn().mockReturnValue(false),
 };

@@ -56,7 +56,7 @@ export function createMockFirestoreManager<T extends BaseStorageMapping>(): jest
     >().mockImplementation(async (key, value, _digest, _version) => {
       await (mock as any).backup(key, value, { digest: 'mock-digest', version: 1 });
     }),
-    writeValueWithDigest: jest.fn().mockResolvedValue(undefined),
+    writeValueWithDigest: jest.fn().mockResolvedValue(undefined as void),
     backupLastBackupToUserDocument: jest.fn<
       (timestamp: number, options?: { transaction?: any }) => Promise<void>
     >().mockResolvedValue(undefined),
@@ -84,7 +84,6 @@ export function createMockMetadataManager<T extends BaseStorageMapping>(): jest.
     hydrateMetadata: jest.fn(),
     needsHydration: jest.fn(),
     getRemoteMetadataOnly: jest.fn(),
-    invalidateCacheForHydration: jest.fn(),
     ensureConsistency: jest.fn(),
     invalidateCache: jest.fn(),
     invalidateAllRemoteCaches: jest.fn(),

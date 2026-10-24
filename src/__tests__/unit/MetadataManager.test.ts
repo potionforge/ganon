@@ -1,6 +1,5 @@
 import MetadataManager from '../../metadata/MetadataManager';
 import KeyRouter from '../../routing/KeyRouter';
-import { CloudBackupConfig } from '../../models/config/CloudBackupConfig';
 import MetadataCoordinatorRepo from '../../metadata/MetadataCoordinatorRepo';
 import LocalMetadataManager from '../../metadata/local/LocalMetadataManager';
 import { GanonConfig } from '../../models/config/GanonConfig';
@@ -119,17 +118,6 @@ describe('MetadataManager Tests', () => {
       mockCoordinatorRepo.getCoordinator = jest.fn().mockReturnValue(mockCoordinator);
     });
 
-    it('should not per-key invalidate during invalidateCacheForHydration (step 4)', async () => {
-      const key = 'workouts' as Extract<keyof TestStorageMapping, string>;
-      await metadataManager.invalidateCacheForHydration(key);
-      expect(mockCoordinator.invalidateCache).not.toHaveBeenCalled();
-    });
-
-    it('invalidateCacheForHydration is a no-op on failure path', async () => {
-      const key = 'workouts' as Extract<keyof TestStorageMapping, string>;
-      await expect(metadataManager.invalidateCacheForHydration(key)).resolves.not.toThrow();
-    });
-
     it('needsHydration delegates to coordinator without per-key invalidate', async () => {
       const key = 'workouts' as Extract<keyof TestStorageMapping, string>;
       mockCoordinator.needsHydration.mockResolvedValue(true);
@@ -156,15 +144,6 @@ describe('MetadataManager Tests', () => {
       expect(result).toBe(false);
       expect(mockCoordinator.invalidateCache).not.toHaveBeenCalled();
       expect(mockCoordinator.needsHydration).not.toHaveBeenCalled();
-    });
-
-    it('should handle invalidateCacheForHydration when coordinator is not found', async () => {
-      const key = 'invalidKey' as Extract<keyof TestStorageMapping, string>;
-      mockCoordinatorRepo.getCoordinator.mockReturnValue(undefined as any);
-      
-      await expect(metadataManager.invalidateCacheForHydration(key)).resolves.not.toThrow();
-      
-      expect(mockCoordinator.invalidateCache).not.toHaveBeenCalled();
     });
 
     it('should handle invalidateCache when coordinator is not found', async () => {

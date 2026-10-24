@@ -76,7 +76,6 @@ describe('SyncEngine Tests', () => {
       getRemoteMetadataOnly: jest.fn(),
       getRemoteMetaForKey: jest.fn().mockReturnValue(undefined),
       invalidateCache: jest.fn(),
-      invalidateCacheForHydration: jest.fn(),
       cancelPendingOperations: jest.fn(),
     } as any;
     mockMetadataManager.isNeverSynced = jest.fn((key: string) => {
@@ -548,8 +547,7 @@ describe('SyncEngine Tests', () => {
         syncStatus: SyncStatus.Synced
       };
 
-      // Mock that needsHydration would return false (local version is newer)
-      mockMetadataManager.needsHydration.mockResolvedValue(false);
+      mockMetadataManager.hydrateMetadata.mockResolvedValue(undefined);
       mockFirestore.fetch.mockResolvedValue(remoteValue);
       mockMetadataManager.getRemoteMetadataOnly.mockResolvedValue(remoteMetadata);
 
@@ -567,13 +565,13 @@ describe('SyncEngine Tests', () => {
         version: remoteMetadata.version,
       });
 
-      // Verify cache invalidation was called
-      expect(mockMetadataManager.invalidateCacheForHydration).toHaveBeenCalledWith('testKey');
+      // Pass-start metadata refresh (one fetch per backup document, not per key)
+      expect(mockMetadataManager.hydrateMetadata).toHaveBeenCalledTimes(1);
     });
 
     it('should handle force hydration failures gracefully', async () => {
       // Setup test data with a failure
-      mockMetadataManager.invalidateCacheForHydration.mockResolvedValue();
+      mockMetadataManager.hydrateMetadata.mockResolvedValue(undefined);
       mockFirestore.fetch.mockRejectedValue(new Error('Network error'));
 
       // Execute force hydration
@@ -1289,7 +1287,7 @@ describe('SyncEngine Tests', () => {
         anotherKey: 99,
       };
 
-      mockFirestore.fetch.mockImplementation(async (key: string) => remoteByKey[key]);
+      mockFirestore.fetch.mockImplementation(async (key: Extract<keyof TestStorage, string>) => remoteByKey[String(key)]);
       mockMetadataManager.getRemoteMetaForKey.mockImplementation((key: string) => ({
         d: 'remote-ignored',
         v: key === 'testKey' ? 111 : 222,
@@ -1855,10 +1853,10 @@ describe('SyncEngine Tests', () => {
 
     it('calls onHydrationComplete before rethrowing when hydrate fails catastrophically', async () => {
       const onHydrationComplete = jest.fn();
-      const configWithCallback: GanonConfig<TestStorage> = {
+      const configWithCallback = {
         ...mockConfig,
         eventCallbacks: { onHydrationComplete },
-      };
+      } as GanonConfig<TestStorage>;
       const engine = new SyncEngine(
         mockStorage,
         mockFirestore,

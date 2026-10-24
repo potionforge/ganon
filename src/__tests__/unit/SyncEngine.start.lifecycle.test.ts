@@ -15,6 +15,15 @@ import {
   createMockStorageManager,
   createMockUserManager,
 } from '../utils/TestSetupUtils';
+import { RestoreResult } from '../../models/sync/RestoreResult';
+
+const emptyHydrateResult: RestoreResult = {
+  success: true,
+  restoredKeys: [],
+  failedKeys: [],
+  integrityFailures: [],
+  timestamp: new Date(),
+};
 
 jest.mock('../../utils/Log', () => ({
   info: jest.fn(),
@@ -52,7 +61,7 @@ function createEngine(
   };
   const storage = deps?.storage ?? createMockStorageManager<TestStorage>();
   const userManager = deps?.userManager ?? createMockUserManager<TestStorage>();
-  userManager.isUserLoggedIn.mockReturnValue(true);
+  jest.spyOn(userManager, 'isUserLoggedIn').mockReturnValue(true);
   return new SyncEngine(
     storage,
     deps?.firestore ?? createMockFirestoreManager<TestStorage>(),
@@ -72,7 +81,7 @@ describe('SyncEngine start/stop lifecycle', () => {
     const engine = createEngine(scheduler, { autoStartSync: true });
     const hydrateSpy = jest
       .spyOn(engine, 'hydrate')
-      .mockResolvedValue({ success: true, restoredKeys: [], failedKeys: [], integrityFailures: [] });
+      .mockResolvedValue(emptyHydrateResult);
 
     engine.start();
     engine.start();
@@ -89,7 +98,7 @@ describe('SyncEngine start/stop lifecycle', () => {
     const engine = createEngine(scheduler, { autoStartSync: true });
     const hydrateSpy = jest
       .spyOn(engine, 'hydrate')
-      .mockResolvedValue({ success: true, restoredKeys: [], failedKeys: [], integrityFailures: [] });
+      .mockResolvedValue(emptyHydrateResult);
 
     engine.start();
     expect(repeatSpy).toHaveBeenCalledTimes(1);
@@ -182,6 +191,7 @@ describe('SyncEngine start/stop lifecycle', () => {
     const remoteValue = 'fresh-remote-value';
     const remoteDigest = computeHash(remoteValue);
 
+    metadataManager.hydrateMetadata.mockResolvedValue(undefined);
     metadataManager.needsHydration.mockResolvedValue(true);
     metadataManager.get.mockReturnValue({
       syncStatus: SyncStatus.Synced,
@@ -205,6 +215,7 @@ describe('SyncEngine start/stop lifecycle', () => {
 
     // Session A: hydrate begins and blocks with hydrationPromise set.
     const firstHydrate = engine.hydrate();
+    await Promise.resolve();
     await Promise.resolve();
     expect(firestore.fetch).toHaveBeenCalledTimes(1);
 
@@ -250,6 +261,12 @@ describe('SyncEngine start/stop lifecycle', () => {
       strategy: IntegrityFailureRecoveryStrategy.FORCE_REFRESH,
     };
 
+    let releaseMetadata!: () => void;
+    const metadataGate = new Promise<void>((resolve) => {
+      releaseMetadata = resolve;
+    });
+
+    metadataManager.hydrateMetadata.mockImplementation(() => metadataGate);
     metadataManager.needsHydration.mockResolvedValue(true);
     metadataManager.get.mockReturnValue(undefined);
     metadataManager.getRemoteMetadataOnly.mockResolvedValue({
@@ -265,6 +282,9 @@ describe('SyncEngine start/stop lifecycle', () => {
     );
 
     const hydratePromise = engine.hydrate(undefined, undefined, integrityConfig);
+    await Promise.resolve();
+    releaseMetadata();
+    await Promise.resolve();
     await Promise.resolve();
 
     engine.stop();
@@ -385,6 +405,7 @@ describe('SyncEngine start/stop lifecycle', () => {
     const remoteValue = 'stale-remote-value';
     const remoteDigest = computeHash(remoteValue);
 
+    metadataManager.hydrateMetadata.mockResolvedValue(undefined);
     metadataManager.needsHydration.mockResolvedValue(true);
     metadataManager.get.mockReturnValue({
       syncStatus: SyncStatus.Synced,
@@ -404,6 +425,7 @@ describe('SyncEngine start/stop lifecycle', () => {
     );
 
     const hydratePromise = engine.hydrate();
+    await Promise.resolve();
     await Promise.resolve();
 
     engine.stop();
@@ -435,6 +457,12 @@ describe('SyncEngine start/stop lifecycle', () => {
       strategy: IntegrityFailureRecoveryStrategy.FORCE_REFRESH,
     };
 
+    let releaseMetadata!: () => void;
+    const metadataGate = new Promise<void>((resolve) => {
+      releaseMetadata = resolve;
+    });
+
+    metadataManager.hydrateMetadata.mockImplementation(() => metadataGate);
     metadataManager.get.mockReturnValue(undefined);
     metadataManager.getRemoteMetadataOnly.mockResolvedValue({
       digest: 'metadata-digest-does-not-match-value',
@@ -449,6 +477,9 @@ describe('SyncEngine start/stop lifecycle', () => {
     );
 
     const hydratePromise = engine.forceHydrate(['key1'], undefined, integrityConfig);
+    await Promise.resolve();
+    releaseMetadata();
+    await Promise.resolve();
     await Promise.resolve();
 
     engine.stop();

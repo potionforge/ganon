@@ -156,14 +156,6 @@ export default class MetadataManager<T extends BaseStorageMapping> {
     return undefined;
   }
 
-  /**
-   * Force cache invalidation for hydration operations to ensure fresh remote metadata.
-   * This ensures we're comparing against the most current remote data.
-   */
-  async invalidateCacheForHydration(_key: Extract<keyof T, string>): Promise<void> {
-    // Hydration pass refreshes per-document cache in hydrateMetadata(); no per-key fetch.
-  }
-
   async invalidateCache(key: Extract<keyof T, string>): Promise<void> {
     Log.verbose(`Ganon: MetadataManager.invalidateCache, key: ${String(key)}`);
     const coordinator = this._getCoordinator(key);
