@@ -78,6 +78,7 @@ export default class RemoteMetadataCache<T extends BaseStorageMapping> {
     // Release the dedupe handle so a subsequent fetch() runs fresh instead of awaiting the
     // now epoch-dead in-flight fetch (mirrors SyncEngine.stop() releasing hydrationPromise).
     this.fetchPromise = null;
+    this.docRef = null;
   }
 
   getCached(): MetadataStorage {

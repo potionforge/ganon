@@ -75,6 +75,7 @@ export default class MetadataFlushQueue<T extends BaseStorageMapping> {
       this.flushHandle = null;
     }
     this.pendingKeys.clear();
+    this.docRef = null;
   }
 
   destroy(): void {

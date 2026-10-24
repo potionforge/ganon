@@ -196,7 +196,9 @@ export default class SyncEngine<T extends BaseStorageMapping> implements ISyncEn
         return result;
       } catch (error) {
         Log.error(`${errorLogMessage}: ${error}`);
-        this.config.eventCallbacks?.onHydrationComplete?.(this._emptyRestoreResult);
+        if (session.isCurrentGeneration()) {
+          this.config.eventCallbacks?.onHydrationComplete?.(this._emptyRestoreResult);
+        }
         throw error;
       } finally {
         if (session.isCurrentGeneration()) {
