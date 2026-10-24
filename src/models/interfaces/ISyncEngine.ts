@@ -7,7 +7,7 @@ import { ConflictResolutionConfig } from "../config/ConflictResolutionConfig";
 import type { RemoteDataProbeResult } from "../sync/RemoteDataProbeResult";
 
 export interface ISyncEngine<T extends BaseStorageMapping> {
-  start(): void;
+  start(options?: { forceHydrate?: boolean }): void;
   stop(): void;
   startSyncInterval(): void;
   stopSyncInterval(): void;

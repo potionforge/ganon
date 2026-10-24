@@ -94,9 +94,16 @@ export default class SyncEngine<T extends BaseStorageMapping> implements ISyncEn
    * Starts sync interval and hydration when configured. Called from Ganon init/login.
    * Constructor is side-effect free (step 7).
    */
-  start(): void {
+  start(options?: { forceHydrate?: boolean }): void {
     if (this.running) {
-      Log.verbose('Ganon: SyncEngine.start skipped — already running');
+      if (options?.forceHydrate && this.userManager.isUserLoggedIn()) {
+        Log.verbose('Ganon: SyncEngine.start forcing hydrate while already running');
+        void this.hydrate().catch(err => {
+          Log.error(`Ganon: error hydrating on forced start: ${err}`);
+        });
+      } else {
+        Log.verbose('Ganon: SyncEngine.start skipped — already running');
+      }
       return;
     }
     this.running = true;

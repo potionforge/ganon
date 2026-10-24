@@ -43,6 +43,8 @@ export default class Ganon<T extends Record<string, any> & BaseStorageMapping> i
   private _syncStopped = false;
   /** Set by stopSync(); cleared at _beginHydrationCycle() — gates login() from restarting sync after interleaved teardown. */
   private _hydrationCycleStopRequested = false;
+  /** True from login() identity write until the login cycle completes or fails — gates startSync(). */
+  private _loginCycleInProgress = false;
   private readonly resolvedConfig: ResolvedGanonConfig<T>;
 
   private readonly _listeners = new Map<
@@ -131,6 +133,10 @@ export default class Ganon<T extends Record<string, any> & BaseStorageMapping> i
    * `whenHydrated()` waiters settle honestly via `onHydrationComplete`.
    */
   startSync(): void {
+    if (this._loginCycleInProgress && !this._syncStopped) {
+      Log.info('Ganon: startSync skipped — login cycle in progress');
+      return;
+    }
     // Resume after a real stopSync(): syncEngine.start() re-fires a hydrate pass because
     // stop() cleared `running`. Re-arm regardless of the prior settle reason — a completed
     // pass leaves reason 'hydrated', so keying off the reason would let whenHydrated() return
@@ -466,12 +472,21 @@ export default class Ganon<T extends Record<string, any> & BaseStorageMapping> i
       return { action: 'noop', probe: 'skipped', restoredKeys: 0, restoreFailedKeys: 0 };
     }
 
+    if (current !== undefined && current !== null && current !== '' && this.isUserLoggedIn()) {
+      await this._teardownSessionForUserSwitch();
+    }
+
     this._beginHydrationCycle();
     const loginHydrationCycle = this.hydrationCycle;
+    const identifierKey = this.config.identifierKey as Extract<keyof T, string>;
+    // After user-switch teardown above, this is guest state (undefined), not A's session —
+    // so a failed login(B) leaves the device logged out rather than restoring A over a torn engine.
+    const previousIdentifier = this.storageManager.get(identifierKey);
 
     try {
+      this._loginCycleInProgress = true;
       // Set identifier locally to mark user as logged in
-      this.storageManager.set(this.config.identifierKey as Extract<keyof T, string>, userId as unknown as T[Extract<keyof T, string>]);
+      this.storageManager.set(identifierKey, userId as unknown as T[Extract<keyof T, string>]);
 
       // Indeterminate must NOT choose backup — that arm runs syncAll with writes.
       const probe = await this.syncEngine.probeRemoteData();
@@ -512,7 +527,9 @@ export default class Ganon<T extends Record<string, any> & BaseStorageMapping> i
 
       if (!stopInterleavedDuringLogin) {
         if (this.resolvedConfig.autoStartSync) {
-          this.syncEngine.start();
+          // forceHydrate: start() is idempotent; hydrate() dedupes if a pass is already in flight
+          // for this generation and that pass settles the login cycle.
+          this.syncEngine.start({ forceHydrate: true });
         } else {
           this._settleHydrationWaiters();
         }
@@ -520,8 +537,15 @@ export default class Ganon<T extends Record<string, any> & BaseStorageMapping> i
 
       return result;
     } catch (error) {
+      if (previousIdentifier !== undefined) {
+        this.storageManager.set(identifierKey, previousIdentifier);
+      } else {
+        this.storageManager.remove(identifierKey);
+      }
       this._settleHydrationWaiters('login-failed');
       throw error;
+    } finally {
+      this._loginCycleInProgress = false;
     }
   }
 
@@ -637,6 +661,17 @@ export default class Ganon<T extends Record<string, any> & BaseStorageMapping> i
   /** Shared by whenHydrated() and earlyWriteGuard — one definition of hydration-pending. */
   private _isHydrationPending(): boolean {
     return this.isUserLoggedIn() && !this.hydrationSettled;
+  }
+
+  /** Logout teardown without backup when login() switches accounts in-process. */
+  private async _teardownSessionForUserSwitch(): Promise<void> {
+    if (this._isHydrationPending()) {
+      this._settleHydrationWaiters('logged-out');
+    }
+    this.stopSync();
+    await this.syncEngine.cancelPendingOperations();
+    this._resetHydrationCycle();
+    this.clearAllData();
   }
 
   private _beginHydrationCycle(): void {
