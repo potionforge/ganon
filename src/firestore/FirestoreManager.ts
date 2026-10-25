@@ -624,9 +624,6 @@ export default class FirestoreManager<T extends BaseStorageMapping> implements I
       const digestTombstones: Record<string, unknown> = {
         [sanitizedKey]: digestTombstoneEntry,
       };
-      if (sanitizedKey !== keyStr) {
-        digestTombstones[keyStr] = digestTombstoneEntry;
-      }
 
       if (type === DocumentOrCollection.Document) {
         const docRef = ref as FirebaseFirestoreTypes.DocumentReference;

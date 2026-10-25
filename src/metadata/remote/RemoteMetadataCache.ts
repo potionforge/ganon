@@ -85,6 +85,12 @@ export default class RemoteMetadataCache<T extends BaseStorageMapping> {
     return this.cache.data;
   }
 
+  /** Resolve digest entry whether the map key is the config key or its sanitized Firestore field name. */
+  entryForConfigKey(configKey: string): MetadataStorage[string] | undefined {
+    const sanitized = this.dataProcessor.sanitizeFieldName(configKey);
+    return this.cache.data[configKey] ?? this.cache.data[sanitized];
+  }
+
   mergeIntoCache(updates: MetadataStorage): void {
     Object.assign(this.cache.data, updates);
     this.cache.lastFetchTime = Date.now();

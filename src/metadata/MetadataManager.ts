@@ -209,8 +209,8 @@ export default class MetadataManager<T extends BaseStorageMapping> {
     }
 
     // Get remote metadata without syncing local changes
-    const remoteMetadata = await coordinator.getRemoteMetadata([key]);
-    const remoteMeta = remoteMetadata[key];
+    await coordinator.getRemoteMetadata([key]);
+    const remoteMeta = coordinator.getRemoteEntryForConfigKey(String(key));
 
     if (remoteMeta) {
       return {

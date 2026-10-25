@@ -51,9 +51,9 @@ export default class MetadataCoordinator<T extends BaseStorageMapping> {
 
   async needsHydration(key: Extract<keyof T, string>): Promise<boolean> {
     await this.remoteCache.fetch();
-    const remoteMetadata = this.remoteCache.getCached();
     const localMetadata = this.metadataStore.get(key);
-    return (remoteMetadata[key]?.v ?? 0) > localMetadata.version;
+    const remote = this.remoteCache.entryForConfigKey(String(key));
+    return (remote?.v ?? 0) > localMetadata.version;
   }
 
   async getRemoteMetadata(keys?: string[]): Promise<MetadataStorage> {
@@ -136,6 +136,10 @@ export default class MetadataCoordinator<T extends BaseStorageMapping> {
 
   getCachedRemote(): MetadataStorage {
     return this.remoteCache.getCached();
+  }
+
+  getRemoteEntryForConfigKey(configKey: string): MetadataStorage[string] | undefined {
+    return this.remoteCache.entryForConfigKey(configKey);
   }
 
   /** Test-only: expose conflict strategy source for characterization tests. */

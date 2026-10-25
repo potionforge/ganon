@@ -61,7 +61,6 @@ export default class MetadataFlushQueue<T extends BaseStorageMapping> {
     await this.remoteCache.fetch();
 
     if (!guardSessionBeforeIo(session, 'MetadataFlushQueue.pre-build-updates')) {
-      this.pendingKeys.clear();
       this.scheduledSession = null;
       return;
     }
@@ -84,7 +83,6 @@ export default class MetadataFlushQueue<T extends BaseStorageMapping> {
     }
 
     if (!guardSessionBeforeIo(session, 'MetadataFlushQueue.pre-mergeIntoCache')) {
-      this.pendingKeys.clear();
       this.scheduledSession = null;
       return;
     }
