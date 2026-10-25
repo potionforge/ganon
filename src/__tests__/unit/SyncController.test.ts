@@ -553,6 +553,7 @@ describe('SyncEngine Tests', () => {
       };
 
       mockMetadataManager.hydrateMetadata.mockResolvedValue(undefined);
+      mockMetadataManager.get.mockReturnValue(undefined);
       mockFirestore.fetch.mockResolvedValue(remoteValue);
       mockMetadataManager.getRemoteMetadataOnly.mockResolvedValue(remoteMetadata);
 
@@ -608,6 +609,7 @@ describe('SyncEngine Tests', () => {
       mockFirestore.fetch
         .mockResolvedValueOnce(remoteValue1)
         .mockResolvedValueOnce(remoteValue2);
+      mockMetadataManager.get.mockReturnValue(undefined);
       mockMetadataManager.getRemoteMetadataOnly
         .mockResolvedValueOnce(remoteMetadata1)
         .mockResolvedValueOnce(remoteMetadata2);
@@ -620,7 +622,7 @@ describe('SyncEngine Tests', () => {
       expect(result.restoredKeys).toContain('testKey');
       expect(result.restoredKeys).toContain('anotherKey');
       expect(result.failedKeys).toHaveLength(0);
-      expect(mockStorage.set).toHaveBeenCalledTimes(4); // 2 keys × 2 calls each (conflict resolution + final storage)
+      expect(mockStorage.set).toHaveBeenCalledTimes(2);
     });
 
     it('should skip force hydration when user is not logged in', async () => {

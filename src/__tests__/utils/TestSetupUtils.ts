@@ -100,6 +100,7 @@ export function createMockMetadataManager<T extends BaseStorageMapping>(): jest.
     hydrateMetadata: jest.fn(),
     needsHydration: jest.fn(),
     getRemoteMetadataOnly: jest.fn(),
+    getRemoteMetaForKey: jest.fn().mockReturnValue(undefined),
     ensureConsistency: jest.fn(),
     invalidateCache: jest.fn(),
     invalidateAllRemoteCaches: jest.fn(),

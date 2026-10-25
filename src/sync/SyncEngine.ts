@@ -734,23 +734,17 @@ export default class SyncEngine<T extends BaseStorageMapping> implements ISyncEn
           if (session.isStale()) {
             return false;
           }
-          let remoteMetadata = await this.metadataManager.getRemoteMetadataOnly(key);
-          if (session.isStale()) {
-            return false;
-          }
           const localMetadata = this.metadataManager.get(key);
-          if (
-            remoteMetadata &&
-            remoteMetadata.digest === '' &&
-            remoteMetadata.version > (localMetadata?.version ?? 0)
-          ) {
-            if (session.isStale()) {
-              return false;
-            }
-            await this._applyRemoteDeleteTombstone(key, session, remoteMetadata.version);
+          const tombstoneCheck = await this._tryApplyRemoteDeleteTombstoneDuringHydrationPass(
+            key,
+            session,
+            localMetadata
+          );
+          if (tombstoneCheck.applied) {
             Log.info(`✅ Ganon: hydrated key ${key} from remote delete tombstone`);
             return true;
           }
+          let remoteMetadata = tombstoneCheck.remoteMetadata;
 
           const remoteValue = await this.firestore.fetch(key);
           if (session.isStale()) {
@@ -946,13 +940,27 @@ export default class SyncEngine<T extends BaseStorageMapping> implements ISyncEn
           return false;
         }
 
+        const localMetadata = this.metadataManager.get(key);
+        const tombstoneCheck = await this._tryApplyRemoteDeleteTombstoneDuringHydrationPass(
+          key,
+          session,
+          localMetadata
+        );
+        if (tombstoneCheck.applied) {
+          Log.info(`✅ Ganon: force hydrated key ${key} from remote delete tombstone`);
+          return true;
+        }
+        let remoteMetadata = tombstoneCheck.remoteMetadata;
+
         const remoteValue = await this.firestore.fetch(key);
         if (session.isStale()) {
           return false;
         }
         if (remoteValue !== undefined) {
           const remoteComputedDigest = computeHash(remoteValue);
-          let remoteMetadata = await this.metadataManager.getRemoteMetadataOnly(key);
+          if (!remoteMetadata) {
+            remoteMetadata = await this.metadataManager.getRemoteMetadataOnly(key);
+          }
           if (session.isStale()) {
             return false;
           }
@@ -963,8 +971,7 @@ export default class SyncEngine<T extends BaseStorageMapping> implements ISyncEn
             return true;
           }
 
-          const localMetadata = this.metadataManager.get(key);
-          const hasConflict = localMetadata && remoteMetadata && ConflictResolver.detectConflict<T>(
+          const hasConflict = localMetadata && ConflictResolver.detectConflict<T>(
             key,
             this.storage.get(key),
             remoteValue as T[Extract<keyof T, string>] | undefined,
@@ -973,21 +980,30 @@ export default class SyncEngine<T extends BaseStorageMapping> implements ISyncEn
           );
 
           if (hasConflict) {
+            const config = { ...this._conflictResolutionConfig, ...this._currentConflictConfig };
             const resolution = ConflictResolver.resolveConflict<T>({
               key,
               localValue: this.storage.get(key),
               remoteValue: remoteValue as T[Extract<keyof T, string>] | undefined,
               localMetadata,
               remoteMetadata,
-              resolutionStrategy: this._conflictResolutionConfig.strategy,
+              resolutionStrategy: config.strategy,
               detectedAt: Date.now()
-            }, this._conflictResolutionConfig.strategy, this._conflictResolutionConfig.mergeStrategy);
+            }, config.strategy, config.mergeStrategy);
 
             if (resolution.success) {
               if (session.isStale()) {
                 return false;
               }
               this.storage.set(key, resolution.resolvedValue!);
+              const resolvedHash = computeHash(resolution.resolvedValue!);
+              await this.metadataManager.recordSyncedState(key, {
+                syncStatus: SyncStatus.Synced,
+                digest: resolvedHash,
+                version: nextVersion(localMetadata?.version ?? 0, this.clock),
+              });
+              Log.info(`✅ Ganon: force hydrated key ${key} with resolved value (conflict resolved)`);
+              return true;
             } else {
               Log.warn(`Ganon: Conflict resolution failed for key ${key}, skipping`);
               return false;
@@ -1291,6 +1307,34 @@ export default class SyncEngine<T extends BaseStorageMapping> implements ISyncEn
       version,
     });
     this.firestore.invalidateSubcollectionReadCache(key, session);
+  }
+
+  /** Shared by hydrate() and forceHydrate() before fetching remote values. */
+  private async _tryApplyRemoteDeleteTombstoneDuringHydrationPass(
+    key: Extract<keyof T, string>,
+    session: SessionToken,
+    localMetadata?: LocalSyncMetadata
+  ): Promise<{ applied: true } | { applied: false; remoteMetadata?: SyncMetadata }> {
+    if (session.isStale()) {
+      return { applied: false };
+    }
+    const remoteMetadata = await this.metadataManager.getRemoteMetadataOnly(key);
+    if (session.isStale()) {
+      return { applied: false };
+    }
+    const localVersion = localMetadata?.version ?? 0;
+    if (
+      remoteMetadata &&
+      remoteMetadata.digest === '' &&
+      remoteMetadata.version > localVersion
+    ) {
+      if (session.isStale()) {
+        return { applied: false };
+      }
+      await this._applyRemoteDeleteTombstone(key, session, remoteMetadata.version);
+      return { applied: true };
+    }
+    return { applied: false, remoteMetadata };
   }
 
   private async _processKeys(

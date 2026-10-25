@@ -222,6 +222,7 @@ describe('SyncEngine start/stop lifecycle', () => {
     await Promise.resolve();
     await Promise.resolve();
     await Promise.resolve();
+    await Promise.resolve();
     expect(firestore.fetch).toHaveBeenCalledTimes(1);
 
     // Logout: stop() must release the dedupe handle so a re-login runs a fresh pass.
