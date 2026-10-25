@@ -393,11 +393,11 @@ export default class ChunkManager<T extends BaseStorageMapping> {
       const docRef = collectionRef.doc('chunk_0');
       const existingData = chunkDocs[0].data();
 
-      // Check for deleted fields recursively
       const hasDeletedFields = this.hasDeletedFieldsRecursive(existingData, toWrite);
 
-      // For arrays converted to objects, we should replace to avoid orphaned keys
-      // For regular objects, we use merge only if no fields were deleted
+      // Empty chunk payloads must replace, never merge — merge {} is a no-op and stale numeric
+      // keys would survive (e.g. [] after a prior [a,b]). [] always replaces via Array.isArray;
+      // {} replaces when keys were removed from the prior payload (hasDeletedFields).
       if (Array.isArray(value) || hasDeletedFields) {
         const operation = Array.isArray(value) ? 'array data' : 'deleted fields';
         Log.info(`ChunkManager: Replacing chunk_0 for ${operation} (${Object.keys(toWrite).length} items) for key "${key}"`);
