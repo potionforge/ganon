@@ -5,6 +5,7 @@ import Log from "../utils/Log";
 import SyncOperationResult from "../models/sync/SyncOperationResult";
 import { BATCH_SIZE } from "../constants";
 import { MMKV } from "react-native-mmkv";
+import { KeyValueStore } from "../ports/KeyValueStore";
 import BaseSyncOperation from "./operations/BaseSyncOperation";
 import SetOperation from "./operations/SetOperation";
 import DeleteOperation from "./operations/DeleteOperation";
@@ -37,14 +38,15 @@ type OperationClass<T extends BaseStorageMapping> = {
 export default class OperationRepo<T extends BaseStorageMapping> {
   private _syncInProgress = false;
   private _pendingOperations: Map<Extract<keyof T, string>, ISyncOperation<T>> = new Map();
-  private _storage: MMKV;
+  private _storage: KeyValueStore;
   private _deps: OperationDependencies<T> | null = null;
 
   constructor(
     private networkMonitor: NetworkMonitor,
-    deps?: OperationDependencies<T>
+    deps?: OperationDependencies<T>,
+    operationsKv?: KeyValueStore
   ) {
-    this._storage = new MMKV({ id: 'ganon_operations' });
+    this._storage = operationsKv ?? new MMKV({ id: 'ganon_operations' });
     if (deps) {
       this._deps = deps;
       this._loadPendingOperations();

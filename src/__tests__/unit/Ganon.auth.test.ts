@@ -25,7 +25,9 @@ const mockStorageManager: any = {
   clearAllData: jest.fn(),
 };
 
-const mockSyncController: any = {
+const mockSyncEngine: any = {
+  start: jest.fn(),
+  stop: jest.fn(),
   startSyncInterval: jest.fn(),
   stopSyncInterval: jest.fn(),
   cancelPendingOperations: jest.fn().mockResolvedValue(undefined),
@@ -33,7 +35,11 @@ const mockSyncController: any = {
   restore: jest.fn(),
   hasAnyRemoteData: jest.fn(),
   probeRemoteData: jest.fn(),
+  isHydrationInProgress: jest.fn().mockReturnValue(false),
 };
+mockSyncEngine.start.mockImplementation(() => {
+  mockSyncEngine.startSyncInterval();
+});
 
 const mockFirestoreManager: any = {};
 const mockNetworkMonitor: any = { destroy: jest.fn() };
@@ -44,7 +50,7 @@ const mockUserManager: any = {
 
 const mockDeps = {
   storageManager: mockStorageManager,
-  syncController: mockSyncController,
+  syncEngine: mockSyncEngine,
   firestoreManager: mockFirestoreManager,
   networkMonitor: mockNetworkMonitor,
   userManager: mockUserManager,
@@ -84,14 +90,14 @@ describe('Ganon auth lifecycle', () => {
     expect(result.probe).toBe('skipped');
     expect(result.restoredKeys).toBe(0);
     expect(result.restoreFailedKeys).toBe(0);
-    expect(mockSyncController.probeRemoteData).not.toHaveBeenCalled();
-    expect(mockSyncController.restore).not.toHaveBeenCalled();
-    expect(mockSyncController.syncAll).not.toHaveBeenCalled();
+    expect(mockSyncEngine.probeRemoteData).not.toHaveBeenCalled();
+    expect(mockSyncEngine.restore).not.toHaveBeenCalled();
+    expect(mockSyncEngine.syncAll).not.toHaveBeenCalled();
   });
 
   it('login: restores when remote data exists for new login', async () => {
-    mockSyncController.probeRemoteData.mockResolvedValue({ status: 'present' });
-    mockSyncController.restore.mockResolvedValue({
+    mockSyncEngine.probeRemoteData.mockResolvedValue({ status: 'present' });
+    mockSyncEngine.restore.mockResolvedValue({
       success: true,
       restoredKeys: ['key1'],
       failedKeys: [],
@@ -104,13 +110,13 @@ describe('Ganon auth lifecycle', () => {
     expect(result.restoredKeys).toBe(1);
     expect(result.restoreFailedKeys).toBe(0);
     expect(mockStorageManager.set).toHaveBeenCalledWith('email', 'u2@example.com');
-    expect(mockSyncController.restore).toHaveBeenCalled();
-    expect(mockSyncController.syncAll).not.toHaveBeenCalled();
+    expect(mockSyncEngine.restore).toHaveBeenCalled();
+    expect(mockSyncEngine.syncAll).not.toHaveBeenCalled();
   });
 
   it('login: surfaces partial restore via restoreFailedKeys on present probe', async () => {
-    mockSyncController.probeRemoteData.mockResolvedValue({ status: 'present' });
-    mockSyncController.restore.mockResolvedValue({
+    mockSyncEngine.probeRemoteData.mockResolvedValue({ status: 'present' });
+    mockSyncEngine.restore.mockResolvedValue({
       success: false,
       restoredKeys: ['key1'],
       failedKeys: ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h'],
@@ -125,24 +131,24 @@ describe('Ganon auth lifecycle', () => {
   });
 
   it('login: backs up when no remote data exists for new login', async () => {
-    mockSyncController.probeRemoteData.mockResolvedValue({ status: 'absent' });
-    mockSyncController.syncAll.mockResolvedValue({ success: true });
+    mockSyncEngine.probeRemoteData.mockResolvedValue({ status: 'absent' });
+    mockSyncEngine.syncAll.mockResolvedValue({ success: true });
     const result = await ganon.login('u3@example.com');
     expect(result.action).toBe('backup');
     expect(result.probe).toBe('absent');
     expect(result.restoredKeys).toBe(0);
     expect(result.restoreFailedKeys).toBe(0);
     expect(mockStorageManager.set).toHaveBeenCalledWith('email', 'u3@example.com');
-    expect(mockSyncController.syncAll).toHaveBeenCalled();
-    expect(mockSyncController.restore).not.toHaveBeenCalled();
+    expect(mockSyncEngine.syncAll).toHaveBeenCalled();
+    expect(mockSyncEngine.restore).not.toHaveBeenCalled();
   });
 
   it('login: refuses backup and restores when remote probe is indeterminate', async () => {
-    mockSyncController.probeRemoteData.mockResolvedValue({
+    mockSyncEngine.probeRemoteData.mockResolvedValue({
       status: 'indeterminate',
       reason: 'user: permission-denied',
     });
-    mockSyncController.restore.mockResolvedValue({
+    mockSyncEngine.restore.mockResolvedValue({
       success: true,
       restoredKeys: [],
       failedKeys: [],
@@ -154,8 +160,8 @@ describe('Ganon auth lifecycle', () => {
     expect(result.probe).toBe('indeterminate');
     expect(result.probeReason).toBe('user: permission-denied');
     expect(result.restoreFailedKeys).toBe(0);
-    expect(mockSyncController.restore).toHaveBeenCalled();
-    expect(mockSyncController.syncAll).not.toHaveBeenCalled();
+    expect(mockSyncEngine.restore).toHaveBeenCalled();
+    expect(mockSyncEngine.syncAll).not.toHaveBeenCalled();
   });
 
   // MOCK BOUNDARY: these two tests mock the syncController (probeRemoteData + restore) because
@@ -170,11 +176,11 @@ describe('Ganon auth lifecycle', () => {
     // Brand-new account, transient probe error that clears by restore time: probe is
     // indeterminate, restore reaches an empty-but-readable remote and pulls nothing back.
     // The guest shell must survive: no destructive backup arm, no local wipe.
-    mockSyncController.probeRemoteData.mockResolvedValue({
+    mockSyncEngine.probeRemoteData.mockResolvedValue({
       status: 'indeterminate',
       reason: 'user: unavailable',
     });
-    mockSyncController.restore.mockResolvedValue({
+    mockSyncEngine.restore.mockResolvedValue({
       success: true,
       restoredKeys: [],
       failedKeys: [],
@@ -185,7 +191,7 @@ describe('Ganon auth lifecycle', () => {
     const result = await ganon.login('u-fresh@example.com');
 
     expect(result.action).toBe('restore');
-    expect(mockSyncController.restore).toHaveBeenCalledTimes(1);
+    expect(mockSyncEngine.restore).toHaveBeenCalledTimes(1);
     // The contract must surface the exact stranded-guest signal for the app:
     // restore + indeterminate + 0 keys. LoginManager keys its fresh-account
     // backup branch off precisely this triple.
@@ -194,7 +200,7 @@ describe('Ganon auth lifecycle', () => {
     expect(result.restoreFailedKeys).toBe(0);
     expect(result.probeReason).toBe('user: unavailable');
     // Indeterminate must never select the destructive backup arm...
-    expect(mockSyncController.syncAll).not.toHaveBeenCalled();
+    expect(mockSyncEngine.syncAll).not.toHaveBeenCalled();
     // ...and must never wipe the guest's local data.
     expect(mockStorageManager.clearAllData).not.toHaveBeenCalled();
   });
@@ -203,16 +209,16 @@ describe('Ganon auth lifecycle', () => {
     // Transient error persists into restore (hydrateMetadata also fails). login must surface
     // the error for the app to handle and must NOT run syncAll as a fallback against a
     // possibly-poisoned shell, nor wipe local data.
-    mockSyncController.probeRemoteData.mockResolvedValue({
+    mockSyncEngine.probeRemoteData.mockResolvedValue({
       status: 'indeterminate',
       reason: 'user: permission-denied',
     });
-    mockSyncController.restore.mockRejectedValue(
+    mockSyncEngine.restore.mockRejectedValue(
       new Error('Metadata hydrate failed for backup document(s): user: permission-denied')
     );
 
     await expect(ganon.login('u-fresh2@example.com')).rejects.toThrow('Metadata hydrate failed');
-    expect(mockSyncController.syncAll).not.toHaveBeenCalled();
+    expect(mockSyncEngine.syncAll).not.toHaveBeenCalled();
     expect(mockStorageManager.clearAllData).not.toHaveBeenCalled();
   });
 
@@ -224,8 +230,8 @@ describe('Ganon auth lifecycle', () => {
     ganon = new Ganon<TestStorage>(configWithAutoSync);
     jest.clearAllMocks();
 
-    mockSyncController.probeRemoteData.mockResolvedValue({ status: 'present' });
-    mockSyncController.restore.mockResolvedValue({
+    mockSyncEngine.probeRemoteData.mockResolvedValue({ status: 'present' });
+    mockSyncEngine.restore.mockResolvedValue({
       success: true,
       restoredKeys: [],
       failedKeys: [],
@@ -234,8 +240,8 @@ describe('Ganon auth lifecycle', () => {
     });
     const result = await ganon.login('u4@example.com');
     expect(result.action).toBe('restore');
-    expect(mockSyncController.restore).toHaveBeenCalled();
-    expect(mockSyncController.startSyncInterval).toHaveBeenCalled();
+    expect(mockSyncEngine.restore).toHaveBeenCalled();
+    expect(mockSyncEngine.start).toHaveBeenCalled();
   });
 
   it('login: restarts sync when autoStartSync is enabled and backing up', async () => {
@@ -246,38 +252,38 @@ describe('Ganon auth lifecycle', () => {
     ganon = new Ganon<TestStorage>(configWithAutoSync);
     jest.clearAllMocks();
 
-    mockSyncController.probeRemoteData.mockResolvedValue({ status: 'absent' });
-    mockSyncController.syncAll.mockResolvedValue({ success: true });
+    mockSyncEngine.probeRemoteData.mockResolvedValue({ status: 'absent' });
+    mockSyncEngine.syncAll.mockResolvedValue({ success: true });
     const result = await ganon.login('u5@example.com');
     expect(result.action).toBe('backup');
-    expect(mockSyncController.syncAll).toHaveBeenCalled();
-    expect(mockSyncController.startSyncInterval).toHaveBeenCalled();
+    expect(mockSyncEngine.syncAll).toHaveBeenCalled();
+    expect(mockSyncEngine.start).toHaveBeenCalled();
   });
 
   it('login: does not restart sync when autoStartSync is disabled', async () => {
-    mockSyncController.probeRemoteData.mockResolvedValue({ status: 'absent' });
-    mockSyncController.syncAll.mockResolvedValue({ success: true });
+    mockSyncEngine.probeRemoteData.mockResolvedValue({ status: 'absent' });
+    mockSyncEngine.syncAll.mockResolvedValue({ success: true });
     const result = await ganon.login('u6@example.com');
     expect(result.action).toBe('backup');
-    expect(mockSyncController.syncAll).toHaveBeenCalled();
-    expect(mockSyncController.startSyncInterval).not.toHaveBeenCalled();
+    expect(mockSyncEngine.syncAll).toHaveBeenCalled();
+    expect(mockSyncEngine.start).not.toHaveBeenCalled();
   });
 
   it('logout: backs up by default, stops sync, cancels, and clears user', async () => {
     mockUserManager.isUserLoggedIn.mockReturnValue(true);
     await ganon.logout();
-    expect(mockSyncController.syncAll).toHaveBeenCalled();
-    expect(mockSyncController.cancelPendingOperations).toHaveBeenCalled();
-    expect(mockSyncController.stopSyncInterval).toHaveBeenCalled();
+    expect(mockSyncEngine.syncAll).toHaveBeenCalled();
+    expect(mockSyncEngine.cancelPendingOperations).toHaveBeenCalled();
+    expect(mockSyncEngine.stop).toHaveBeenCalled();
     expect(mockStorageManager.clearAllData).toHaveBeenCalled();
   });
 
   it('logout: can skip backup when option provided', async () => {
     mockUserManager.isUserLoggedIn.mockReturnValue(true);
     await ganon.logout({ backup: false });
-    expect(mockSyncController.syncAll).not.toHaveBeenCalled();
-    expect(mockSyncController.cancelPendingOperations).toHaveBeenCalled();
-    expect(mockSyncController.stopSyncInterval).toHaveBeenCalled();
+    expect(mockSyncEngine.syncAll).not.toHaveBeenCalled();
+    expect(mockSyncEngine.cancelPendingOperations).toHaveBeenCalled();
+    expect(mockSyncEngine.stop).toHaveBeenCalled();
     expect(mockStorageManager.clearAllData).toHaveBeenCalled();
   });
 });

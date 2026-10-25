@@ -243,7 +243,11 @@ export class MockCloudManager<T extends BaseStorageMapping> implements ICloudMan
     return `digest_${JSON.stringify(value).length}_${Date.now()}`;
   }
 
-  async backup(key: Extract<keyof T, string>, value: any): Promise<void> {
+  async backup(
+    key: Extract<keyof T, string>,
+    value: any,
+    options: { digest: string; version: number }
+  ): Promise<void> {
     if (!this.isUserLoggedIn()) {
       throw new Error('User must be logged in to perform backup operations');
     }
@@ -258,9 +262,8 @@ export class MockCloudManager<T extends BaseStorageMapping> implements ICloudMan
       throw new Error(`Mock backup failure for key: ${key}`);
     }
 
-    const newDigest = this.generateDigest(value);
     this.cloudStorage.set(key, value);
-    this.digestMap.set(key, newDigest);
+    this.digestMap.set(key, options.digest);
 
     // Track backup calls
     this.backupCallCount[key] = (this.backupCallCount[key] || 0) + 1;

@@ -1,4 +1,4 @@
-import SyncController from '../../sync/SyncController';
+import SyncEngine from '../../sync/SyncEngine';
 import StorageManager from '../../managers/StorageManager';
 import FirestoreManager from '../../firestore/FirestoreManager';
 import OperationRepo from '../../sync/OperationRepo';
@@ -12,6 +12,8 @@ import LocalMetadataManager from '../../metadata/local/LocalMetadataManager';
 import FirestoreAdapter from '../../firestore/FirestoreAdapter';
 import FirestoreReferenceManager from '../../firestore/ref/FirestoreReferenceManager';
 import UserManager from '../../managers/UserManager';
+import { resolveGanonConfig } from '../../models/config/resolveGanonConfig';
+import { FakeScheduler } from '../utils/FakeScheduler';
 
 // Mock dependencies
 jest.mock('../../managers/StorageManager');
@@ -32,8 +34,8 @@ interface TestStorage {
   lastBackup: number;
 }
 
-describe('SyncController Sync Status Tests', () => {
-  let syncController: SyncController<TestStorage>;
+describe('SyncEngine Sync Status Tests', () => {
+  let syncEngine: SyncEngine<TestStorage>;
   let storageManager: jest.Mocked<StorageManager<TestStorage>>;
   let firestoreManager: jest.Mocked<FirestoreManager<TestStorage>>;
   let metadataManager: jest.Mocked<MetadataManager<TestStorage>>;
@@ -89,7 +91,9 @@ describe('SyncController Sync Status Tests', () => {
       adapter,
       referenceManager,
       localMetadata,
-      mockUserManager
+      mockUserManager,
+      resolveGanonConfig(config),
+      new FakeScheduler()
     ) as jest.Mocked<MetadataCoordinatorRepo<TestStorage>>;
 
     // Initialize MetadataManager
@@ -99,15 +103,22 @@ describe('SyncController Sync Status Tests', () => {
       localMetadata
     ) as jest.Mocked<MetadataManager<TestStorage>>;
     
-    // Mock the set method to return a resolved promise
-    metadataManager.set = jest.fn().mockResolvedValue(undefined);
+    const setMock = jest.fn().mockResolvedValue(undefined);
+    metadataManager.set = setMock;
+    metadataManager.recordLocalChange = setMock;
+    metadataManager.persistLocalChange = setMock;
+    metadataManager.recordSyncedState = setMock;
+    metadataManager.isNeverSynced = jest.fn((key: keyof TestStorage) => {
+      const meta = metadataManager.get(key);
+      return !meta?.digest;
+    });
 
     // Initialize OperationRepo
     const networkMonitor = new NetworkMonitor();
     operationRepo = new OperationRepo<TestStorage>(networkMonitor) as jest.Mocked<OperationRepo<TestStorage>>;
 
-    // Create SyncController instance
-    syncController = new SyncController(
+    // Create SyncEngine instance
+    syncEngine = new SyncEngine(
       storageManager,
       firestoreManager,
       metadataManager,
@@ -138,15 +149,15 @@ describe('SyncController Sync Status Tests', () => {
       });
 
       // Act
-      syncController.markAsPending(key);
+      syncEngine.markAsPending(key);
       jest.runAllTimers();
 
       // Assert
-      expect(metadataManager.set).toHaveBeenCalledWith(key, expect.objectContaining({
+      expect(metadataManager.recordLocalChange).toHaveBeenCalledWith(key, expect.objectContaining({
         syncStatus: SyncStatus.Pending,
         digest: expect.any(String),
         version: expect.any(Number)
-      }), true); // Should schedule remote sync by default
+      }));
       expect(operationRepo.addOperation).toHaveBeenCalled();
     });
 
@@ -158,15 +169,15 @@ describe('SyncController Sync Status Tests', () => {
       metadataManager.get.mockReturnValue(undefined);
 
       // Act
-      syncController.markAsPending(key);
+      syncEngine.markAsPending(key);
       jest.runAllTimers();
 
       // Assert
-      expect(metadataManager.set).toHaveBeenCalledWith(key, expect.objectContaining({
+      expect(metadataManager.recordLocalChange).toHaveBeenCalledWith(key, expect.objectContaining({
         syncStatus: SyncStatus.Pending,
         digest: expect.any(String),
         version: expect.any(Number)
-      }), true); // Should schedule remote sync by default
+      }));
       expect(operationRepo.addOperation).toHaveBeenCalled();
     });
 
@@ -183,7 +194,7 @@ describe('SyncController Sync Status Tests', () => {
       });
 
       // Act
-      syncController.markAsPending(key);
+      syncEngine.markAsPending(key);
       jest.runAllTimers();
 
       // Assert
@@ -203,7 +214,7 @@ describe('SyncController Sync Status Tests', () => {
       });
 
       // Act
-      syncController.markAsPending(key);
+      syncEngine.markAsPending(key);
       jest.runAllTimers();
 
       // Assert - markAsDeleted uses updateSyncStatus, not set
@@ -224,7 +235,7 @@ describe('SyncController Sync Status Tests', () => {
       });
 
       // Act
-      syncController.markAsDeleted(key);
+      syncEngine.markAsDeleted(key);
 
       // Assert - markAsDeleted uses updateSyncStatus, not set
       expect(metadataManager.updateSyncStatus).toHaveBeenCalledWith(key, SyncStatus.Pending);
@@ -237,7 +248,7 @@ describe('SyncController Sync Status Tests', () => {
       metadataManager.get.mockReturnValue(undefined);
 
       // Act
-      syncController.markAsDeleted(key);
+      syncEngine.markAsDeleted(key);
 
       // Assert
       expect(metadataManager.updateSyncStatus).not.toHaveBeenCalled();
@@ -254,7 +265,7 @@ describe('SyncController Sync Status Tests', () => {
       });
 
       // Act
-      syncController.markAsDeleted(key);
+      syncEngine.markAsDeleted(key);
 
       // Assert
       expect(metadataManager.updateSyncStatus).not.toHaveBeenCalled();
@@ -269,7 +280,7 @@ describe('SyncController Sync Status Tests', () => {
       metadataManager.get.mockReturnValue(createMetadata(SyncStatus.Synced));
 
       // Act
-      const status = syncController.getSyncStatus(key);
+      const status = syncEngine.getSyncStatus(key);
 
       // Assert
       expect(status).toBe(SyncStatus.Synced);
@@ -290,7 +301,7 @@ describe('SyncController Sync Status Tests', () => {
       // Act & Assert
       statuses.forEach(expectedStatus => {
         metadataManager.get.mockReturnValue(createMetadata(expectedStatus));
-        const status = syncController.getSyncStatus(key);
+        const status = syncEngine.getSyncStatus(key);
         expect(status).toBe(expectedStatus);
       });
     });
@@ -318,7 +329,7 @@ describe('SyncController Sync Status Tests', () => {
       });
 
       // Act
-      const pendingKeys = syncController.getKeysByStatus(SyncStatus.Pending);
+      const pendingKeys = syncEngine.getKeysByStatus(SyncStatus.Pending);
 
       // Assert
       expect(pendingKeys).toEqual(['key1', 'key3']);
@@ -338,7 +349,7 @@ describe('SyncController Sync Status Tests', () => {
       });
 
       // Act
-      const pendingKeys = syncController.getKeysByStatus(SyncStatus.Pending);
+      const pendingKeys = syncEngine.getKeysByStatus(SyncStatus.Pending);
 
       // Assert
       expect(pendingKeys).toEqual([]);
@@ -358,7 +369,7 @@ describe('SyncController Sync Status Tests', () => {
       });
 
       // Act
-      const syncedKeys = syncController.getKeysByStatus(SyncStatus.Synced);
+      const syncedKeys = syncEngine.getKeysByStatus(SyncStatus.Synced);
 
       // Assert
       expect(syncedKeys).toEqual(['key1', 'key2', 'key3']);
@@ -387,7 +398,7 @@ describe('SyncController Sync Status Tests', () => {
       });
 
       // Act
-      const summary = syncController.getSyncStatusSummary();
+      const summary = syncEngine.getSyncStatusSummary();
 
       // Assert
       expect(summary).toEqual({
@@ -413,7 +424,7 @@ describe('SyncController Sync Status Tests', () => {
       });
 
       // Act
-      const summary = syncController.getSyncStatusSummary();
+      const summary = syncEngine.getSyncStatusSummary();
 
       // Assert
       expect(summary[SyncStatus.Pending]).toBe(3);
@@ -424,7 +435,7 @@ describe('SyncController Sync Status Tests', () => {
       firestoreManager.cloudConfig = {};
 
       // Act
-      const summary = syncController.getSyncStatusSummary();
+      const summary = syncEngine.getSyncStatusSummary();
 
       // Assert
       expect(summary).toEqual({
@@ -446,7 +457,7 @@ describe('SyncController Sync Status Tests', () => {
         .mockReturnValueOnce(createMetadata(SyncStatus.Synced));  // key3
 
       // Act
-      const hasPending = syncController.hasPendingOperations();
+      const hasPending = syncEngine.hasPendingOperations();
 
       // Assert
       expect(hasPending).toBe(true);
@@ -460,7 +471,7 @@ describe('SyncController Sync Status Tests', () => {
         .mockReturnValueOnce(createMetadata(SyncStatus.Synced));   // key3
 
       // Act
-      const hasPending = syncController.hasPendingOperations();
+      const hasPending = syncEngine.hasPendingOperations();
 
       // Assert
       expect(hasPending).toBe(true);
@@ -474,7 +485,7 @@ describe('SyncController Sync Status Tests', () => {
         .mockReturnValueOnce(createMetadata(SyncStatus.Synced));  // key3
 
       // Act
-      const hasPending = syncController.hasPendingOperations();
+      const hasPending = syncEngine.hasPendingOperations();
 
       // Assert
       expect(hasPending).toBe(false);
@@ -485,7 +496,7 @@ describe('SyncController Sync Status Tests', () => {
       firestoreManager.cloudConfig = {};
 
       // Act
-      const hasPending = syncController.hasPendingOperations();
+      const hasPending = syncEngine.hasPendingOperations();
 
       // Assert
       expect(hasPending).toBe(false);

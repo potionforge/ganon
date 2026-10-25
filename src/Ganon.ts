@@ -2,6 +2,7 @@ import FirestoreManager from "./firestore/FirestoreManager";
 import StorageManager from "./managers/StorageManager";
 import NetworkMonitor from "./utils/NetworkMonitor";
 import { GanonConfig, InternalGanonConfig } from "./models/config/GanonConfig";
+import { resolveGanonConfig, ResolvedGanonConfig } from "./models/config/resolveGanonConfig";
 import { IntegrityFailureConfig } from "./models/config/IntegrityFailureConfig";
 import { IGanon } from "./models/interfaces/IGanon";
 import { BaseStorageMapping } from "./models/storage/BaseStorageMapping";
@@ -10,7 +11,7 @@ import { RestoreResult } from "./models/sync/RestoreResult";
 import { LoginResult } from "./models/sync/LoginResult";
 import Log from "./utils/Log";
 import SyncError, { SyncErrorType } from "./errors/SyncError";
-import SyncController from "./sync/SyncController";
+import SyncEngine from "./sync/SyncEngine";
 import DependencyFactory from "./factory/DependencyFactory";
 import UserManager from "./managers/UserManager";
 import { ConflictResolutionConfig } from "./models/config/ConflictResolutionConfig";
@@ -19,16 +20,32 @@ import type {
   GanonEventPayloadMap,
   GanonEventListener,
 } from "./models/events/GanonEvents";
+import KeyRouter from "./routing/KeyRouter";
+import { METADATA_KEY, DIGEST_MAP_KEY, REMOTE_METADATA_KEY } from "./constants";
+import type { HydrationWaitReason } from "./models/sync/HydrationWaitReason";
 
 export default class Ganon<T extends Record<string, any> & BaseStorageMapping> implements IGanon<T> {
   private storageManager: StorageManager<T>;
-  private syncController: SyncController<T>;
+  private syncEngine: SyncEngine<T>;
   private firestoreManager: FirestoreManager<T>;
   private networkMonitor: NetworkMonitor;
   private static unhandledRejectionHandlerSet = false;
   private userManager: UserManager<T>;
+  private keyRouter: KeyRouter<T>;
   private isDestroyed: boolean = false;
   private isInitialized: boolean = false;
+  private hydrationWaiters: Array<{ resolve: (reason: HydrationWaitReason) => void; cycle: number }> = [];
+  private hydrationCycle = 0;
+  private hydrationSettled = true;
+  /** Last settle reason for the current cycle; late whenHydrated() reads this when settled. */
+  private hydrationSettleReason: HydrationWaitReason = 'hydrated';
+  /** True between stopSync() and the next start; drives resume-after-stop hydration re-arm. */
+  private _syncStopped = false;
+  /** Set by stopSync(); cleared at _beginHydrationCycle() — gates login() from restarting sync after interleaved teardown. */
+  private _hydrationCycleStopRequested = false;
+  /** True from login() identity write until the login cycle completes or fails — gates startSync(). */
+  private _loginCycleInProgress = false;
+  private readonly resolvedConfig: ResolvedGanonConfig<T>;
 
   private readonly _listeners = new Map<
     GanonEventName,
@@ -36,6 +53,7 @@ export default class Ganon<T extends Record<string, any> & BaseStorageMapping> i
   >();
 
   constructor(readonly config: GanonConfig<T>) {
+    this.resolvedConfig = resolveGanonConfig(config);
     this._validateConfig(config);
 
     if (config.logLevel !== undefined) {
@@ -46,7 +64,14 @@ export default class Ganon<T extends Record<string, any> & BaseStorageMapping> i
     const internalConfig: InternalGanonConfig<T> = {
       ...config,
       eventCallbacks: {
-        onHydrationComplete: (result) => this._emit("hydrationComplete", result),
+        onHydrationComplete: (result) => {
+          // Defense-in-depth: engine skips this callback on stale paths today, but guard
+          // aborted results so a future wiring change cannot settle on a torn-down pass.
+          if (this.isUserLoggedIn() && !result.aborted) {
+            this._settleHydrationWaiters();
+          }
+          this._emit("hydrationComplete", result);
+        },
       },
     };
 
@@ -61,17 +86,19 @@ export default class Ganon<T extends Record<string, any> & BaseStorageMapping> i
       const dependencyFactory = new DependencyFactory<T>(internalConfig);
       const {
         storageManager,
-        syncController,
+        syncEngine,
         firestoreManager,
         networkMonitor,
         userManager,
+        keyRouter,
       } = dependencyFactory.getDependencies();
 
       this.storageManager = storageManager;
-      this.syncController = syncController;
+      this.syncEngine = syncEngine;
       this.firestoreManager = firestoreManager;
       this.networkMonitor = networkMonitor;
       this.userManager = userManager;
+      this.keyRouter = keyRouter;
       this.isInitialized = true;
 
       // Permanent build identity — also proves Metro resolved this package tree.
@@ -80,8 +107,9 @@ export default class Ganon<T extends Record<string, any> & BaseStorageMapping> i
       Log.info(`Ganon: v${ganonVersion}`);
 
       // Start sync if autoStartSync is enabled and user is logged in
-      if (config.autoStartSync && this.isUserLoggedIn()) {
-        this.startSync();
+      if (this.resolvedConfig.autoStartSync && this.isUserLoggedIn()) {
+        this._beginHydrationCycle();
+        this.syncEngine.start();
       }
     } catch (error) {
       Log.error(`Ganon: Failed to initialize components: ${error}`);
@@ -101,17 +129,45 @@ export default class Ganon<T extends Record<string, any> & BaseStorageMapping> i
   }
 
   /**
-   * Starts the automatic synchronization process with the cloud.
+   * Starts sync interval and, when resuming after `stopSync()`, re-arms hydration so
+   * `whenHydrated()` waiters settle honestly via `onHydrationComplete`.
    */
   startSync(): void {
-    this.syncController.startSyncInterval();
+    if (this._loginCycleInProgress && !this._syncStopped) {
+      Log.info('Ganon: startSync skipped — login cycle in progress');
+      return;
+    }
+    // Resume after a real stopSync(): syncEngine.start() re-fires a hydrate pass because
+    // stop() cleared `running`. Re-arm regardless of the prior settle reason — a completed
+    // pass leaves reason 'hydrated', so keying off the reason would let whenHydrated() return
+    // 'hydrated' while the resumed pass is still running. _beginHydrationCycle() bumps the
+    // cycle and clears hydrationSettled so waiters block until onHydrationComplete settles.
+    const resumingAfterStop = this._syncStopped && this.isUserLoggedIn();
+    this._syncStopped = false;
+    if (resumingAfterStop) {
+      this._beginHydrationCycle();
+    }
+    this.syncEngine.start();
   }
 
   /**
-   * Stops the automatic synchronization process with the cloud.
+   * Tears down the sync engine: stops the interval, invalidates any in-flight
+   * hydration pass, and discards pending debounced markAsPending state.
+   *
+   * NOTE: teardown, not resumable pause. A key edited within the markAsPending
+   * debounce window (~50ms) whose mark has not yet flushed is dropped — local value
+   * persists but nothing records it Pending, so no later sync picks it up until that
+   * key is touched again. Run `await ganon.backup()` first if recent edits must be
+   * captured: syncAll() synchronously flushes pending marks before processOperations().
+   * Used internally by `logout()` (after `backup()`) and `destroy()`.
    */
   stopSync(): void {
-    this.syncController.stopSyncInterval();
+    if (this._isHydrationPending()) {
+      this._settleHydrationWaiters('stopped');
+    }
+    this._hydrationCycleStopRequested = true;
+    this._syncStopped = true;
+    this.syncEngine.stop();
   }
 
   /**
@@ -128,6 +184,41 @@ export default class Ganon<T extends Record<string, any> & BaseStorageMapping> i
   }
 
   /**
+   * Returns the stored value or fallback without persisting the default (I1).
+   */
+  getOrDefault<K extends keyof T>(key: K, fallback: T[K]): T[K] {
+    const value = this.get(key);
+    return value !== undefined ? value : fallback;
+  }
+
+  /**
+   * Resolves when Ganon's hydration settles for the current login cycle.
+   * Pending before first login; waiters resolve on logout; fresh pending per new login.
+   * Resolves with `'hydrated'` when Ganon's hydration settles, `'logged-out'` if logout
+   * resolved the waiter first, `'login-failed'` if `login()` threw after beginning the
+   * hydration cycle, or `'stopped'` if `stopSync()`/`destroy()` tore down sync before
+   * hydration completed. Consumer-side post-login merges may not have applied yet.
+   */
+  whenHydrated(): Promise<HydrationWaitReason> {
+    if (this.isDestroyed) {
+      return Promise.reject(
+        new SyncError('Cannot perform operation: Ganon instance has been destroyed', SyncErrorType.SyncConfigurationError)
+      );
+    }
+    if (!this.isUserLoggedIn()) {
+      return new Promise(resolve => {
+        this.hydrationWaiters.push({ resolve, cycle: 0 });
+      });
+    }
+    if (!this._isHydrationPending()) {
+      return Promise.resolve(this.hydrationSettleReason);
+    }
+    return new Promise(resolve => {
+      this.hydrationWaiters.push({ resolve, cycle: this.hydrationCycle });
+    });
+  }
+
+  /**
    * Sets a value in storage for a given key and marks it for synchronization if the key is configured in cloudConfig.
    * @param key - The key to set the value for.
    * @param value - The value to store.
@@ -137,9 +228,10 @@ export default class Ganon<T extends Record<string, any> & BaseStorageMapping> i
       throw new SyncError('Cannot perform operation: Ganon instance has been destroyed', SyncErrorType.SyncConfigurationError);
     }
 
+    this._guardEarlyWrite(key);
     this.storageManager.set(key, value);
     if (this._shouldSyncKey(key) && this.isUserLoggedIn()) {
-      this.syncController.markAsPending(key);
+      this.syncEngine.markAsPending(key);
     }
   }
 
@@ -152,9 +244,10 @@ export default class Ganon<T extends Record<string, any> & BaseStorageMapping> i
       throw new SyncError('Cannot perform operation: Ganon instance has been destroyed', SyncErrorType.SyncConfigurationError);
     }
 
+    this._guardEarlyWrite(key);
     this.storageManager.remove(key);
     if (this._shouldSyncKey(key) && this.isUserLoggedIn()) {
-      this.syncController.markAsDeleted(key);
+      this.syncEngine.markAsDeleted(key);
     }
   }
 
@@ -168,9 +261,10 @@ export default class Ganon<T extends Record<string, any> & BaseStorageMapping> i
       throw new SyncError('Cannot perform operation: Ganon instance has been destroyed', SyncErrorType.SyncConfigurationError);
     }
 
+    this._guardEarlyWrite(key);
     this.storageManager.upsert(key, value);
     if (this._shouldSyncKey(key) && this.isUserLoggedIn()) {
-      this.syncController.markAsPending(key);
+      this.syncEngine.markAsPending(key);
     }
   }
 
@@ -195,7 +289,7 @@ export default class Ganon<T extends Record<string, any> & BaseStorageMapping> i
   async backup(): Promise<BackupResult> {
     Log.info('Ganon: Backing up all data to the cloud');
     try {
-      const result = await this.syncController.syncAll();
+      const result = await this.syncEngine.syncAll();
       this._emit("syncComplete", result);
       return result;
     } catch (error) {
@@ -216,14 +310,16 @@ export default class Ganon<T extends Record<string, any> & BaseStorageMapping> i
    */
   async restore(): Promise<RestoreResult> {
     Log.info('Ganon: Restoring all data from the cloud');
-    const result = await this.syncController.restore();
-    this._emit("restoreComplete", result);
-    Log.info(`✅ Ganon: Restored ${result.restoredKeys.length} keys`);
-    if (result.failedKeys.length > 0) {
-      Log.error(`❌ Ganon: Failed to restore ${result.failedKeys.length} keys: ${result.failedKeys.join(', ')}`);
-    }
-    if (result.integrityFailures.length > 0) {
-      Log.warn(`⚠️ Ganon: ${result.integrityFailures.length} keys had integrity failures: ${result.integrityFailures.map(f => f.key).join(', ')}`);
+    const result = await this.syncEngine.restore();
+    if (!result.aborted) {
+      this._emit("restoreComplete", result);
+      Log.info(`✅ Ganon: Restored ${result.restoredKeys.length} keys`);
+      if (result.failedKeys.length > 0) {
+        Log.error(`❌ Ganon: Failed to restore ${result.failedKeys.length} keys: ${result.failedKeys.join(', ')}`);
+      }
+      if (result.integrityFailures.length > 0) {
+        Log.warn(`⚠️ Ganon: ${result.integrityFailures.length} keys had integrity failures: ${result.integrityFailures.map(f => f.key).join(', ')}`);
+      }
     }
     return result;
   }
@@ -241,7 +337,7 @@ export default class Ganon<T extends Record<string, any> & BaseStorageMapping> i
 
     Log.info('Ganon: Hydrating data from the cloud');
     try {
-      const result = await this.syncController.hydrate(keys, conflictConfig, integrityConfig);
+      const result = await this.syncEngine.hydrate(keys, conflictConfig, integrityConfig);
       Log.info(`✅ Ganon: Hydrated ${result.restoredKeys.length} keys`);
       if (result.failedKeys.length > 0) {
         Log.error(`❌ Ganon: Failed to hydrate ${result.failedKeys.length} keys: ${result.failedKeys.join(', ')}`);
@@ -281,7 +377,7 @@ export default class Ganon<T extends Record<string, any> & BaseStorageMapping> i
 
     Log.info('Ganon: Force hydrating data from the cloud');
     try {
-      const result = await this.syncController.forceHydrate(keys, conflictConfig, integrityConfig);
+      const result = await this.syncEngine.forceHydrate(keys, conflictConfig, integrityConfig);
       Log.info(`✅ Ganon: Force hydrated ${result.restoredKeys.length} keys`);
       if (result.failedKeys.length > 0) {
         Log.error(`❌ Ganon: Failed to force hydrate ${result.failedKeys.length} keys: ${result.failedKeys.join(', ')}`);
@@ -358,10 +454,10 @@ export default class Ganon<T extends Record<string, any> & BaseStorageMapping> i
    * - If this is a new login and remote has no data, backs up local guest state.
    *
    * Returns a {@link LoginResult} carrying the action performed, the probe
-   * outcome that drove it, and the number of keys actually restored. Ganon
-   * exposes these facts; it does NOT schedule deferred re-probes or other hidden
-   * behavior — the app owns any policy that reacts to an indeterminate probe
-   * (e.g. a fresh guest whose local data hasn't reached the cloud yet).
+   * outcome that drove it, and the number of keys actually restored. Use
+   * `whenHydrated()` for hydration status (e.g. `'stopped'` if teardown interleaved).
+   * Ganon exposes these facts; it does NOT schedule deferred re-probes — the app
+   * owns any policy that reacts to an indeterminate probe.
    */
   async login(userId: string): Promise<LoginResult> {
     if (this.isDestroyed) {
@@ -376,47 +472,81 @@ export default class Ganon<T extends Record<string, any> & BaseStorageMapping> i
       return { action: 'noop', probe: 'skipped', restoredKeys: 0, restoreFailedKeys: 0 };
     }
 
-    // Set identifier locally to mark user as logged in
-    this.storageManager.set(this.config.identifierKey as Extract<keyof T, string>, userId as unknown as T[Extract<keyof T, string>]);
-
-    // Decide whether remote has data. Indeterminate must NOT choose backup —
-    // that arm runs syncAll with writes; errors-as-empty was the incident trigger.
-    const probe = await this.syncController.probeRemoteData();
-
-    let result: LoginResult;
-    if (probe.status === 'present') {
-      Log.info('Ganon: Existing remote data detected on login - restoring');
-      const restoreResult = await this.restore();
-      result = {
-        action: 'restore',
-        probe: 'present',
-        restoredKeys: restoreResult.restoredKeys.length,
-        restoreFailedKeys: restoreResult.failedKeys.length,
-      };
-    } else if (probe.status === 'indeterminate') {
-      Log.warn(
-        `Ganon: Remote probe indeterminate on login (${probe.reason}); refusing backup, attempting restore`
-      );
-      const restoreResult = await this.restore();
-      result = {
-        action: 'restore',
-        probe: 'indeterminate',
-        restoredKeys: restoreResult.restoredKeys.length,
-        restoreFailedKeys: restoreResult.failedKeys.length,
-        probeReason: probe.reason,
-      };
-    } else {
-      Log.info('Ganon: No remote data detected on login - backing up local guest state');
-      await this.backup();
-      result = { action: 'backup', probe: 'absent', restoredKeys: 0, restoreFailedKeys: 0 };
+    if (current !== undefined && current !== null && current !== '' && this.isUserLoggedIn()) {
+      await this._teardownSessionForUserSwitch();
     }
 
-    // Start sync if autoStartSync is enabled (sync was stopped during logout)
-    if (this.config.autoStartSync) {
-      this.startSync();
-    }
+    this._beginHydrationCycle();
+    const loginHydrationCycle = this.hydrationCycle;
+    const identifierKey = this.config.identifierKey as Extract<keyof T, string>;
+    // After user-switch teardown above, this is guest state (undefined), not A's session —
+    // so a failed login(B) leaves the device logged out rather than restoring A over a torn engine.
+    const previousIdentifier = this.storageManager.get(identifierKey);
 
-    return result;
+    try {
+      this._loginCycleInProgress = true;
+      // Set identifier locally to mark user as logged in
+      this.storageManager.set(identifierKey, userId as unknown as T[Extract<keyof T, string>]);
+
+      // Indeterminate must NOT choose backup — that arm runs syncAll with writes.
+      const probe = await this.syncEngine.probeRemoteData();
+
+      let result: LoginResult;
+      if (probe.status === 'present') {
+        Log.info('Ganon: Existing remote data detected on login - restoring');
+        const restoreResult = await this.restore();
+        result = {
+          action: 'restore',
+          probe: 'present',
+          restoredKeys: restoreResult.restoredKeys.length,
+          restoreFailedKeys: restoreResult.failedKeys.length,
+        };
+      } else if (probe.status === 'indeterminate') {
+        Log.warn(
+          `Ganon: Remote probe indeterminate on login (${probe.reason}); refusing backup, attempting restore`
+        );
+        const restoreResult = await this.restore();
+        result = {
+          action: 'restore',
+          probe: 'indeterminate',
+          restoredKeys: restoreResult.restoredKeys.length,
+          restoreFailedKeys: restoreResult.failedKeys.length,
+          probeReason: probe.reason,
+        };
+      } else {
+        Log.info('Ganon: No remote data detected on login - backing up local guest state');
+        await this.backup();
+        result = { action: 'backup', probe: 'absent', restoredKeys: 0, restoreFailedKeys: 0 };
+      }
+
+      const stopInterleavedDuringLogin =
+        this._hydrationCycleStopRequested ||
+        (this.hydrationSettled &&
+          this.hydrationSettleReason === 'stopped' &&
+          this.hydrationCycle === loginHydrationCycle);
+
+      if (!stopInterleavedDuringLogin) {
+        if (this.resolvedConfig.autoStartSync) {
+          // forceHydrate: start() is idempotent; hydrate() dedupes if a pass is already in flight
+          // for this generation and that pass settles the login cycle.
+          this.syncEngine.start({ forceHydrate: true });
+        } else {
+          this._settleHydrationWaiters();
+        }
+      }
+
+      return result;
+    } catch (error) {
+      if (previousIdentifier !== undefined) {
+        this.storageManager.set(identifierKey, previousIdentifier);
+      } else {
+        this.storageManager.remove(identifierKey);
+      }
+      this._settleHydrationWaiters('login-failed');
+      throw error;
+    } finally {
+      this._loginCycleInProgress = false;
+    }
   }
 
   /**
@@ -436,11 +566,12 @@ export default class Ganon<T extends Record<string, any> & BaseStorageMapping> i
         await this.backup();
       }
     } finally {
-      // Stop sync first so no new syncPending/_updateLastBackup can enqueue.
+      if (this._isHydrationPending()) {
+        this._settleHydrationWaiters('logged-out');
+      }
       this.stopSync();
-      // Await cancel: drains in-flight lastBackup user-doc write before wipe so it
-      // cannot complete inside the next account's login/probe window.
-      await this.syncController.cancelPendingOperations();
+      await this.syncEngine.cancelPendingOperations();
+      this._resetHydrationCycle();
 
       // Clear all data
       this.clearAllData();
@@ -462,8 +593,8 @@ export default class Ganon<T extends Record<string, any> & BaseStorageMapping> i
       this.stopSync();
 
       // Clean up components if they exist
-      if (this.syncController) {
-        this.syncController.destroy();
+      if (this.syncEngine) {
+        this.syncEngine.destroy();
       }
       if (this.networkMonitor) {
         this.networkMonitor.destroy();
@@ -527,6 +658,72 @@ export default class Ganon<T extends Record<string, any> & BaseStorageMapping> i
 
   /* P R I V A T E */
 
+  /** Shared by whenHydrated() and earlyWriteGuard — one definition of hydration-pending. */
+  private _isHydrationPending(): boolean {
+    return this.isUserLoggedIn() && !this.hydrationSettled;
+  }
+
+  /** Logout teardown without backup when login() switches accounts in-process. */
+  private async _teardownSessionForUserSwitch(): Promise<void> {
+    if (this._isHydrationPending()) {
+      this._settleHydrationWaiters('logged-out');
+    }
+    this.stopSync();
+    await this.syncEngine.cancelPendingOperations();
+    this._resetHydrationCycle();
+    this.clearAllData();
+  }
+
+  private _beginHydrationCycle(): void {
+    this.hydrationCycle += 1;
+    this.hydrationSettled = false;
+    // A fresh cycle (login or resume) clears the stopped flag so a stale value left by
+    // logout()'s internal stopSync() can't make a later startSync() re-arm while running.
+    this._syncStopped = false;
+    this._hydrationCycleStopRequested = false;
+  }
+
+  private _settleHydrationWaiters(reason: HydrationWaitReason = 'hydrated'): void {
+    if (this.hydrationSettled) {
+      return;
+    }
+    this.hydrationSettled = true;
+    this.hydrationSettleReason = reason;
+    const cycle = this.hydrationCycle;
+    const waiters = this.hydrationWaiters.filter(w => w.cycle === cycle || w.cycle === 0);
+    this.hydrationWaiters = this.hydrationWaiters.filter(w => w.cycle !== cycle && w.cycle !== 0);
+    waiters.forEach(w => w.resolve(reason));
+  }
+
+  /** Resolve pending waiters on logout so promises never dangle across sessions. */
+  private _resolveHydrationWaitersOnLogout(): void {
+    const waiters = [...this.hydrationWaiters];
+    this.hydrationWaiters = [];
+    waiters.forEach(w => w.resolve('logged-out'));
+  }
+
+  private _resetHydrationCycle(): void {
+    this._resolveHydrationWaitersOnLogout();
+    this.hydrationCycle += 1;
+    this.hydrationSettled = true;
+    this.hydrationSettleReason = 'logged-out';
+  }
+
+  private _guardEarlyWrite(key: Extract<keyof T, string>): void {
+    const guard = this.config.earlyWriteGuard ?? 'off';
+    if (guard === 'off' || !this._shouldSyncKey(key)) {
+      return;
+    }
+    if (!this._isHydrationPending()) {
+      return;
+    }
+    const message = `Write to "${String(key)}" while hydration is in progress`;
+    if (guard === 'throw') {
+      throw new SyncError(message, SyncErrorType.SyncValidationError);
+    }
+    Log.warn(`Ganon: ${message}`);
+  }
+
   /**
    * Checks if a key is configured for cloud synchronization
    * @param key - The key to check
@@ -536,13 +733,7 @@ export default class Ganon<T extends Record<string, any> & BaseStorageMapping> i
     if (!this.isInitialized || this.isDestroyed) {
       return false;
     }
-
-    for (const docConfig of Object.values(this.config.cloudConfig)) {
-      if (docConfig.docKeys?.includes(key) || docConfig.subcollectionKeys?.includes(key)) {
-        return true;
-      }
-    }
-    return false;
+    return this.keyRouter.isCloudKey(key);
   }
 
   /**
@@ -708,6 +899,27 @@ export default class Ganon<T extends Record<string, any> & BaseStorageMapping> i
         if (!validKeyRegex.test(key)) {
           throw new SyncError(
             `Ganon: Key "${key}" in document "${docName}" is invalid. Keys must contain only letters, numbers, underscores, and hyphens.`,
+            SyncErrorType.SyncConfigurationError
+          );
+        }
+
+        if (key === METADATA_KEY) {
+          throw new SyncError(
+            `Ganon: Key "${key}" in document "${docName}" collides with reserved metadata namespace`,
+            SyncErrorType.SyncConfigurationError
+          );
+        }
+
+        if (key === DIGEST_MAP_KEY) {
+          throw new SyncError(
+            `Ganon: Key "${key}" in document "${docName}" collides with reserved in-document digest namespace`,
+            SyncErrorType.SyncConfigurationError
+          );
+        }
+
+        if (key === REMOTE_METADATA_KEY) {
+          throw new SyncError(
+            `Ganon: Key "${key}" in document "${docName}" collides with reserved legacy remote metadata namespace`,
             SyncErrorType.SyncConfigurationError
           );
         }

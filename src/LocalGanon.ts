@@ -8,6 +8,8 @@ import { IntegrityFailureConfig } from "./models/config/IntegrityFailureConfig";
 import type { GanonEventName, GanonEventListener } from "./models/events/GanonEvents";
 import Log from "./utils/Log";
 import SyncError, { SyncErrorType } from "./errors/SyncError";
+import type { HydrationWaitReason } from "./models/sync/HydrationWaitReason";
+import type { LoginResult } from "./models/sync/LoginResult";
 
 /**
  * Simplified configuration for LocalGanon that only requires an identifier key
@@ -47,6 +49,29 @@ export default class LocalGanon<T extends Record<string, any> & BaseStorageMappi
     }
 
     return this.storageManager.get(key);
+  }
+
+  getOrDefault<K extends keyof T>(key: K, fallback: T[K]): T[K] {
+    const value = this.get(key);
+    return value !== undefined ? value : fallback;
+  }
+
+  isUserLoggedIn(): boolean {
+    return false;
+  }
+
+  async login(_userId: string): Promise<LoginResult> {
+    Log.warn('LocalGanon: login() called but LocalGanon does not support cloud synchronization');
+    return { action: 'noop', probe: 'skipped', restoredKeys: 0, restoreFailedKeys: 0 };
+  }
+
+  async logout(_options?: { backup?: boolean }): Promise<void> {
+    Log.warn('LocalGanon: logout() called but LocalGanon does not support cloud synchronization');
+    this.clearAllData();
+  }
+
+  whenHydrated(): Promise<HydrationWaitReason> {
+    return Promise.resolve('hydrated');
   }
 
   /**

@@ -1,5 +1,5 @@
 import { jest } from '@jest/globals';
-import SyncController from '../../sync/SyncController';
+import SyncEngine from '../../sync/SyncEngine';
 import StorageManager from '../../managers/StorageManager';
 import FirestoreManager from '../../firestore/FirestoreManager';
 import OperationRepo from '../../sync/OperationRepo';
@@ -27,8 +27,8 @@ interface TestStorage extends BaseStorageMapping {
   lastBackup: number;
 }
 
-describe('SyncController Tests', () => {
-  let syncController: SyncController<TestStorage>;
+describe('SyncEngine Tests', () => {
+  let syncEngine: SyncEngine<TestStorage>;
   let mockStorage: jest.Mocked<StorageManager<TestStorage>>;
   let mockFirestore: jest.Mocked<FirestoreManager<TestStorage>>;
   let mockMetadataManager: jest.Mocked<MetadataManager<TestStorage>>;
@@ -63,18 +63,26 @@ describe('SyncController Tests', () => {
       backupLastBackupToUserDocument: jest.fn().mockResolvedValue(undefined as never),
     } as any;
 
+    const setMock = jest.fn().mockResolvedValue(undefined as never);
     mockMetadataManager = {
       get: jest.fn(),
-      set: jest.fn(),
+      set: setMock,
+      recordLocalChange: setMock,
+      persistLocalChange: setMock,
+      recordSyncedState: setMock,
       updateSyncStatus: jest.fn(),
       hydrateMetadata: jest.fn(),
       needsHydration: jest.fn(),
       getRemoteMetadataOnly: jest.fn(),
       probeRemoteTenure: jest.fn(),
+      getRemoteMetaForKey: jest.fn().mockReturnValue(undefined),
       invalidateCache: jest.fn(),
-      invalidateCacheForHydration: jest.fn(),
       cancelPendingOperations: jest.fn(),
     } as any;
+    mockMetadataManager.isNeverSynced = jest.fn((key: string) => {
+      const meta = mockMetadataManager.get(key as keyof TestStorage);
+      return !meta?.digest;
+    });
 
     mockOperationRepo = {
       addOperation: jest.fn(),
@@ -98,6 +106,7 @@ describe('SyncController Tests', () => {
         }
       },
       syncInterval: 1000,
+      autoStartSync: true,
       conflictResolutionConfig: {
         strategy: ConflictResolutionStrategy.LOCAL_WINS,
         mergeStrategy: ConflictMergeStrategy.DEEP_MERGE,
@@ -134,7 +143,7 @@ describe('SyncController Tests', () => {
       return undefined;
     });
 
-    syncController = new SyncController(
+    syncEngine = new SyncEngine(
       mockStorage,
       mockFirestore,
       mockMetadataManager,
@@ -148,10 +157,10 @@ describe('SyncController Tests', () => {
     jest.clearAllMocks();
     jest.restoreAllMocks();
     jest.useRealTimers(); // Restore real timers
-    syncController.stopSyncInterval();
+    syncEngine.stopSyncInterval();
     // Reset hydration tracking for each test
-    (syncController as any).hasHydratedAfterLogin = false;
-    (syncController as any).currentUserForHydration = null;
+    (syncEngine as any).hasHydratedAfterLogin = false;
+    (syncEngine as any).currentUserForHydration = null;
   });
 
   describe('Constructor', () => {
@@ -164,10 +173,10 @@ describe('SyncController Tests', () => {
       };
 
       // Spy on startSyncInterval
-      const startSyncSpy = jest.spyOn(SyncController.prototype, 'startSyncInterval');
+      const startSyncSpy = jest.spyOn(SyncEngine.prototype, 'startSyncInterval');
 
-      // Create a new controller with autoStartSync
-      const controller = new SyncController(
+      // Create a new engine with autoStartSync — side effects happen in start()
+      const controller = new SyncEngine(
         mockStorage,
         mockFirestore,
         mockMetadataManager,
@@ -175,6 +184,7 @@ describe('SyncController Tests', () => {
         mockUserManager,
         configWithAutoStart
       );
+      controller.start();
 
       // Verify startSyncInterval was called
       expect(startSyncSpy).toHaveBeenCalledTimes(1);
@@ -193,10 +203,10 @@ describe('SyncController Tests', () => {
       };
 
       // Spy on startSyncInterval
-      const startSyncSpy = jest.spyOn(SyncController.prototype, 'startSyncInterval');
+      const startSyncSpy = jest.spyOn(SyncEngine.prototype, 'startSyncInterval');
 
       // Create a new controller without autoStartSync
-      const controller = new SyncController(
+      const controller = new SyncEngine(
         mockStorage,
         mockFirestore,
         mockMetadataManager,
@@ -204,11 +214,36 @@ describe('SyncController Tests', () => {
         mockUserManager,
         configWithoutAutoStart
       );
+      controller.start();
 
       // Verify startSyncInterval was not called
       expect(startSyncSpy).not.toHaveBeenCalled();
 
       // Cleanup
+      controller.stopSyncInterval();
+      startSyncSpy.mockRestore();
+    });
+
+    it('start() with omitted autoStartSync starts sync interval (resolved default true)', () => {
+      const configOmitted: GanonConfig<TestStorage> = {
+        identifierKey: 'email',
+        cloudConfig: mockConfig.cloudConfig,
+        syncInterval: 1000,
+      };
+
+      const startSyncSpy = jest.spyOn(SyncEngine.prototype, 'startSyncInterval');
+      const controller = new SyncEngine(
+        mockStorage,
+        mockFirestore,
+        mockMetadataManager,
+        mockOperationRepo,
+        mockUserManager,
+        configOmitted
+      );
+      controller.start();
+
+      expect(startSyncSpy).toHaveBeenCalledTimes(1);
+
       controller.stopSyncInterval();
       startSyncSpy.mockRestore();
     });
@@ -221,7 +256,7 @@ describe('SyncController Tests', () => {
       };
 
       // Create a new controller without sync interval
-      const controller = new SyncController(
+      const controller = new SyncEngine(
         mockStorage,
         mockFirestore,
         mockMetadataManager,
@@ -250,27 +285,27 @@ describe('SyncController Tests', () => {
       mockFirestore.fetch.mockResolvedValue(testValue);
       mockMetadataManager.getRemoteMetadataOnly.mockResolvedValue(remoteMetadata);
 
-      // Create new controller which should trigger hydration
-      const controller = new SyncController(
+      const configNoInterval = { ...mockConfig, autoStartSync: false };
+      const controller = new SyncEngine(
         mockStorage,
         mockFirestore,
         mockMetadataManager,
         mockOperationRepo,
         mockUserManager,
-        mockConfig
+        configNoInterval
       );
+      controller.start();
 
-      // Run all pending timers and promises
-      await jest.runAllTimersAsync();
-      await Promise.resolve(); // Flush microtasks
+      await jest.runOnlyPendingTimersAsync();
+      await Promise.resolve();
 
       // Verify hydration occurred
       expect(mockStorage.set).toHaveBeenCalledWith('testKey', testValue);
-      expect(mockMetadataManager.set).toHaveBeenCalledWith('testKey', {
+      expect(mockMetadataManager.recordSyncedState).toHaveBeenCalledWith('testKey', {
         syncStatus: SyncStatus.Synced,
         digest: remoteMetadata.digest,
         version: remoteMetadata.version,
-      }, false); // Don't schedule remote sync during hydration
+      });
 
       // Cleanup
       controller.stopSyncInterval();
@@ -281,7 +316,7 @@ describe('SyncController Tests', () => {
       mockUserManager.isUserLoggedIn.mockReturnValue(false);
 
       // Create new controller which should not trigger hydration
-      const controller = new SyncController(
+      const controller = new SyncEngine(
         mockStorage,
         mockFirestore,
         mockMetadataManager,
@@ -296,7 +331,7 @@ describe('SyncController Tests', () => {
 
       // Verify no hydration occurred
       expect(mockStorage.set).not.toHaveBeenCalled();
-      expect(mockMetadataManager.set).not.toHaveBeenCalled();
+      expect(mockMetadataManager.recordSyncedState).not.toHaveBeenCalled();
       expect(mockFirestore.fetch).not.toHaveBeenCalled();
 
       // Cleanup
@@ -308,24 +343,24 @@ describe('SyncController Tests', () => {
       mockUserManager.isUserLoggedIn.mockReturnValue(true);
       mockMetadataManager.needsHydration.mockRejectedValue(new Error('Hydration failed'));
 
-      // Create new controller which should attempt hydration but handle the error
-      const controller = new SyncController(
+      const configNoInterval = { ...mockConfig, autoStartSync: false };
+      const controller = new SyncEngine(
         mockStorage,
         mockFirestore,
         mockMetadataManager,
         mockOperationRepo,
         mockUserManager,
-        mockConfig
+        configNoInterval
       );
+      controller.start();
 
-      // Run all pending timers and promises
-      await jest.runAllTimersAsync();
-      await Promise.resolve(); // Flush microtasks
+      await jest.runOnlyPendingTimersAsync();
+      await Promise.resolve();
 
       // Verify hydration was attempted but failed gracefully
       expect(mockMetadataManager.needsHydration).toHaveBeenCalled();
       expect(mockStorage.set).not.toHaveBeenCalled();
-      expect(mockMetadataManager.set).not.toHaveBeenCalled();
+      expect(mockMetadataManager.recordSyncedState).not.toHaveBeenCalled();
 
       // Cleanup
       controller.stopSyncInterval();
@@ -342,11 +377,11 @@ describe('SyncController Tests', () => {
       mockOperationRepo.processOperations.mockResolvedValue([{ success: true, key: 'testKey' }]);
 
       // Mark a key as pending
-      syncController.markAsPending('testKey');
+      syncEngine.markAsPending('testKey');
       jest.runAllTimers();
 
       // Execute sync
-      await syncController.syncPending();
+      await syncEngine.syncPending();
 
       // Verify results
       expect(mockOperationRepo.processOperations).toHaveBeenCalled();
@@ -359,16 +394,16 @@ describe('SyncController Tests', () => {
       mockOperationRepo.processOperations.mockRejectedValue(new Error('Sync failed'));
 
       // Mark a key as pending
-      syncController.markAsPending('testKey');
+      syncEngine.markAsPending('testKey');
       jest.runAllTimers();
 
       // Execute sync and expect it to handle the error
-      await expect(syncController.syncPending()).rejects.toThrow('Sync failed');
-      expect(mockMetadataManager.set).toHaveBeenCalledWith('testKey', expect.objectContaining({
+      await expect(syncEngine.syncPending()).rejects.toThrow('Sync failed');
+      expect(mockMetadataManager.recordLocalChange).toHaveBeenCalledWith('testKey', expect.objectContaining({
         syncStatus: SyncStatus.Pending,
         digest: expect.any(String),
         version: expect.any(Number)
-      }), true); // Should schedule remote sync when autosync is enabled
+      }));
     });
 
     it('should handle delete operations', async () => {
@@ -376,11 +411,11 @@ describe('SyncController Tests', () => {
       mockOperationRepo.processOperations.mockResolvedValue([{ success: true, key: 'testKey' }]);
 
       // Mark a key as deleted
-      syncController.markAsDeleted('testKey');
+      syncEngine.markAsDeleted('testKey');
       jest.runAllTimers();
 
       // Execute sync
-      await syncController.syncPending();
+      await syncEngine.syncPending();
 
       // Verify results
       expect(mockOperationRepo.processOperations).toHaveBeenCalled();
@@ -392,8 +427,8 @@ describe('SyncController Tests', () => {
       mockOperationRepo.processOperations.mockResolvedValue([{ success: true, key: 'testKey' }]);
 
       // Start two concurrent syncs
-      const sync1Promise = syncController.syncPending();
-      const sync2Promise = syncController.syncPending();
+      const sync1Promise = syncEngine.syncPending();
+      const sync2Promise = syncEngine.syncPending();
 
       await Promise.all([sync1Promise, sync2Promise]);
 
@@ -406,10 +441,10 @@ describe('SyncController Tests', () => {
       mockOperationRepo.processOperations.mockResolvedValue([{ success: true, key: 'testKey' }]);
 
       // Start sync
-      const syncPromise = syncController.syncPending();
+      const syncPromise = syncEngine.syncPending();
 
       // Add a new key while sync is in progress
-      syncController.markAsPending('anotherKey');
+      syncEngine.markAsPending('anotherKey');
       jest.runAllTimers();
 
       // Wait for sync to complete
@@ -424,10 +459,10 @@ describe('SyncController Tests', () => {
       mockOperationRepo.processOperations.mockResolvedValue([{ success: true, key: 'testKey' }]);
 
       // Start sync
-      const syncPromise = syncController.syncPending();
+      const syncPromise = syncEngine.syncPending();
 
       // Add a new key while sync is in progress
-      syncController.markAsPending('anotherKey');
+      syncEngine.markAsPending('anotherKey');
       jest.runAllTimers();
 
       // Wait for sync to complete
@@ -447,12 +482,12 @@ describe('SyncController Tests', () => {
       mockOperationRepo.processOperations.mockReturnValue(syncPromise as any);
 
       // Start sync
-      const syncInProgress = syncController.syncPending();
+      const syncInProgress = syncEngine.syncPending();
 
       // Perform other operations while sync is in progress
       // Add different keys to test batching
-      syncController.markAsPending('testKey');
-      syncController.markAsDeleted('anotherKey');
+      syncEngine.markAsPending('testKey');
+      syncEngine.markAsDeleted('anotherKey');
       jest.runAllTimers();
 
       // With batching, we expect one operation per unique key
@@ -489,18 +524,18 @@ describe('SyncController Tests', () => {
       mockMetadataManager.getRemoteMetadataOnly.mockResolvedValue(remoteMetadata);
 
       // Execute hydration
-      const result = await syncController.hydrate();
+      const result = await syncEngine.hydrate();
 
       // Verify results
       expect(result.success).toBe(true);
       expect(result.restoredKeys).toContain('testKey');
       expect(result.failedKeys).toHaveLength(0);
       expect(mockStorage.set).toHaveBeenCalledWith('testKey', remoteValue);
-      expect(mockMetadataManager.set).toHaveBeenCalledWith('testKey', {
+      expect(mockMetadataManager.recordSyncedState).toHaveBeenCalledWith('testKey', {
         syncStatus: SyncStatus.Synced,
         digest: remoteMetadata.digest,
         version: remoteMetadata.version,
-      }, false); // Don't schedule remote sync during hydration
+      });
     });
 
     it('should force hydrate data regardless of version comparison', async () => {
@@ -513,36 +548,35 @@ describe('SyncController Tests', () => {
         syncStatus: SyncStatus.Synced
       };
 
-      // Mock that needsHydration would return false (local version is newer)
-      mockMetadataManager.needsHydration.mockResolvedValue(false);
+      mockMetadataManager.hydrateMetadata.mockResolvedValue(undefined);
       mockFirestore.fetch.mockResolvedValue(remoteValue);
       mockMetadataManager.getRemoteMetadataOnly.mockResolvedValue(remoteMetadata);
 
       // Execute force hydration
-      const result = await syncController.forceHydrate(['testKey']);
+      const result = await syncEngine.forceHydrate(['testKey']);
 
       // Verify results - should hydrate even though needsHydration returned false
       expect(result.success).toBe(true);
       expect(result.restoredKeys).toContain('testKey');
       expect(result.failedKeys).toHaveLength(0);
       expect(mockStorage.set).toHaveBeenCalledWith('testKey', remoteValue);
-      expect(mockMetadataManager.set).toHaveBeenCalledWith('testKey', {
+      expect(mockMetadataManager.recordSyncedState).toHaveBeenCalledWith('testKey', {
         syncStatus: SyncStatus.Synced,
         digest: remoteMetadata.digest,
         version: remoteMetadata.version,
-      }, false); // Don't schedule remote sync during hydration
+      });
 
-      // Verify cache invalidation was called
-      expect(mockMetadataManager.invalidateCacheForHydration).toHaveBeenCalledWith('testKey');
+      // Pass-start metadata refresh (one fetch per backup document, not per key)
+      expect(mockMetadataManager.hydrateMetadata).toHaveBeenCalledTimes(1);
     });
 
     it('should handle force hydration failures gracefully', async () => {
       // Setup test data with a failure
-      mockMetadataManager.invalidateCacheForHydration.mockResolvedValue();
+      mockMetadataManager.hydrateMetadata.mockResolvedValue(undefined);
       mockFirestore.fetch.mockRejectedValue(new Error('Network error'));
 
       // Execute force hydration
-      const result = await syncController.forceHydrate(['testKey']);
+      const result = await syncEngine.forceHydrate(['testKey']);
 
       // Verify results
       expect(result.success).toBe(false);
@@ -575,7 +609,7 @@ describe('SyncController Tests', () => {
         .mockResolvedValueOnce(remoteMetadata2);
 
       // Execute force hydration
-      const result = await syncController.forceHydrate(['testKey', 'anotherKey']);
+      const result = await syncEngine.forceHydrate(['testKey', 'anotherKey']);
 
       // Verify results
       expect(result.success).toBe(true);
@@ -588,7 +622,7 @@ describe('SyncController Tests', () => {
     it('should skip force hydration when user is not logged in', async () => {
       mockUserManager.isUserLoggedIn.mockReturnValue(false);
 
-      const result = await syncController.forceHydrate(['testKey']);
+      const result = await syncEngine.forceHydrate(['testKey']);
 
       expect(result.success).toBe(false);
       expect(result.restoredKeys).toHaveLength(0);
@@ -619,18 +653,18 @@ describe('SyncController Tests', () => {
       jest.spyOn(require('../../utils/computeHash'), 'default').mockReturnValue(correctDigest);
 
       // Execute force hydration
-      const resultPromise = syncController.forceHydrate(['testKey']);
+      const resultPromise = syncEngine.forceHydrate(['testKey']);
       await jest.runAllTimersAsync();
       const result = await resultPromise;
 
       // Verify the retry mechanism worked
       expect(mockMetadataManager.getRemoteMetadataOnly).toHaveBeenCalledTimes(3);
       expect(mockStorage.set).toHaveBeenCalledWith('testKey', testValue);
-      expect(mockMetadataManager.set).toHaveBeenCalledWith('testKey', {
+      expect(mockMetadataManager.recordSyncedState).toHaveBeenCalledWith('testKey', {
         syncStatus: SyncStatus.Synced,
         digest: correctDigest,
         version: 1,
-      }, false); // Don't schedule remote sync during hydration
+      });
       expect(result.success).toBe(true);
       expect(result.restoredKeys).toContain('testKey');
       expect(result.failedKeys).toHaveLength(0);
@@ -653,7 +687,7 @@ describe('SyncController Tests', () => {
       jest.spyOn(require('../../utils/computeHash'), 'default').mockReturnValue('different-digest');
 
       // Execute force hydration with SKIP strategy to test persistent corruption handling
-      const resultPromise = syncController.forceHydrate(['testKey'], undefined, {
+      const resultPromise = syncEngine.forceHydrate(['testKey'], undefined, {
         strategy: IntegrityFailureRecoveryStrategy.SKIP
       });
       await jest.runAllTimersAsync();
@@ -662,7 +696,7 @@ describe('SyncController Tests', () => {
       // Verify the retry mechanism was attempted but failed (SKIP strategy doesn't call invalidateCache)
       expect(mockMetadataManager.getRemoteMetadataOnly).toHaveBeenCalledTimes(4);
       expect(mockStorage.set).not.toHaveBeenCalled();
-      expect(mockMetadataManager.set).not.toHaveBeenCalled();
+      expect(mockMetadataManager.recordSyncedState).not.toHaveBeenCalled();
       expect(result.success).toBe(true); // Still true because other keys might succeed
       expect(result.restoredKeys).not.toContain('testKey');
       expect(result.failedKeys).toHaveLength(0);
@@ -675,12 +709,12 @@ describe('SyncController Tests', () => {
       mockFirestore.fetch.mockResolvedValue(testValue);
       mockMetadataManager.getRemoteMetadataOnly.mockResolvedValue(undefined);
 
-      const result = await syncController.forceHydrate(['testKey']);
+      const result = await syncEngine.forceHydrate(['testKey']);
 
       // When remoteMetadata is undefined, the hydration still succeeds,
       // but no storage/metadata operations are performed
       expect(mockStorage.set).not.toHaveBeenCalled();
-      expect(mockMetadataManager.set).not.toHaveBeenCalled();
+      expect(mockMetadataManager.recordSyncedState).not.toHaveBeenCalled();
       expect(result.success).toBe(true);
       expect(result.restoredKeys).toContain('testKey'); // Still returns true from processKey
       expect(result.failedKeys).toHaveLength(0);
@@ -693,11 +727,11 @@ describe('SyncController Tests', () => {
       mockFirestore.fetch.mockResolvedValue(testValue);
       mockMetadataManager.getRemoteMetadataOnly.mockRejectedValue(new Error('Metadata consistency error'));
 
-      const result = await syncController.forceHydrate(['testKey']);
+      const result = await syncEngine.forceHydrate(['testKey']);
 
       // Verify no hydration occurred due to metadata error
       expect(mockStorage.set).not.toHaveBeenCalled();
-      expect(mockMetadataManager.set).not.toHaveBeenCalled();
+      expect(mockMetadataManager.recordSyncedState).not.toHaveBeenCalled();
       expect(result.success).toBe(false);
       expect(result.restoredKeys).toHaveLength(0);
       expect(result.failedKeys).toContain('testKey');
@@ -721,13 +755,13 @@ describe('SyncController Tests', () => {
         throw new Error('Hash computation failed');
       });
 
-      const resultPromise = syncController.hydrate();
+      const resultPromise = syncEngine.hydrate();
       await jest.runAllTimersAsync();
       const result = await resultPromise;
 
       // Verify no hydration occurred due to hash computation error
       expect(mockStorage.set).not.toHaveBeenCalled();
-      expect(mockMetadataManager.set).not.toHaveBeenCalled();
+      expect(mockMetadataManager.recordSyncedState).not.toHaveBeenCalled();
       expect(result.success).toBe(false);
       expect(result.restoredKeys).toHaveLength(0);
       expect(result.failedKeys).toContain('testKey');
@@ -751,7 +785,7 @@ describe('SyncController Tests', () => {
       mockMetadataManager.getRemoteMetadataOnly.mockResolvedValue(remoteMetadata);
 
       // Execute hydration
-      const resultPromise = syncController.hydrate();
+      const resultPromise = syncEngine.hydrate();
       await jest.runAllTimersAsync();
       const result = await resultPromise;
 
@@ -760,11 +794,11 @@ describe('SyncController Tests', () => {
       expect(result.restoredKeys).toContain('testKey');
       expect(result.failedKeys).toHaveLength(0);
       expect(mockStorage.set).toHaveBeenCalledWith('testKey', remoteValue);
-      expect(mockMetadataManager.set).toHaveBeenCalledWith('testKey', {
+      expect(mockMetadataManager.recordSyncedState).toHaveBeenCalledWith('testKey', {
         syncStatus: SyncStatus.Synced,
         digest: remoteMetadata.digest,
         version: remoteMetadata.version,
-      }, false); // Don't schedule remote sync during hydration
+      });
     });
 
     it('should resolve conflicts during hydration with local-wins strategy', async () => {
@@ -798,7 +832,7 @@ describe('SyncController Tests', () => {
       mockMetadataManager.getRemoteMetadataOnly.mockResolvedValue(remoteMetadata);
 
       // Execute hydration
-      const result = await syncController.hydrate(['testKey']);
+      const result = await syncEngine.hydrate(['testKey']);
 
       // Verify results
       expect(result.success).toBe(true);
@@ -809,11 +843,11 @@ describe('SyncController Tests', () => {
       expect(mockStorage.set).toHaveBeenCalledWith('testKey', localValue);
       
       // Verify metadata was updated with resolved hash
-      expect(mockMetadataManager.set).toHaveBeenCalledWith('testKey', {
+      expect(mockMetadataManager.recordSyncedState).toHaveBeenCalledWith('testKey', {
         syncStatus: SyncStatus.Synced,
         digest: computeHash(localValue), // Should use local value hash
         version: expect.any(Number), // Should use current timestamp
-      }, false); // Don't schedule remote sync during hydration
+      });
     });
 
     it('should resolve conflicts during hydration with remote-wins strategy', async () => {
@@ -847,7 +881,7 @@ describe('SyncController Tests', () => {
       mockMetadataManager.getRemoteMetadataOnly.mockResolvedValue(remoteMetadata);
 
       // Execute hydration with remote-wins strategy
-      const result = await syncController.hydrate(['testKey'], {
+      const result = await syncEngine.hydrate(['testKey'], {
         strategy: ConflictResolutionStrategy.REMOTE_WINS
       });
 
@@ -860,11 +894,11 @@ describe('SyncController Tests', () => {
       expect(mockStorage.set).toHaveBeenCalledWith('testKey', remoteValue);
       
       // Verify metadata was updated with resolved hash
-      expect(mockMetadataManager.set).toHaveBeenCalledWith('testKey', {
+      expect(mockMetadataManager.recordSyncedState).toHaveBeenCalledWith('testKey', {
         syncStatus: SyncStatus.Synced,
         digest: computeHash(remoteValue), // Should use remote value hash
         version: expect.any(Number), // Should use current timestamp
-      }, false); // Don't schedule remote sync during hydration
+      });
     });
 
     it('should resolve conflicts during hydration with last-modified-wins strategy', async () => {
@@ -898,7 +932,7 @@ describe('SyncController Tests', () => {
       mockMetadataManager.getRemoteMetadataOnly.mockResolvedValue(remoteMetadata);
 
       // Execute hydration with last-modified-wins strategy
-      const result = await syncController.hydrate(['testKey'], {
+      const result = await syncEngine.hydrate(['testKey'], {
         strategy: ConflictResolutionStrategy.LAST_MODIFIED_WINS
       });
 
@@ -911,11 +945,11 @@ describe('SyncController Tests', () => {
       expect(mockStorage.set).toHaveBeenCalledWith('testKey', remoteValue);
       
       // Verify metadata was updated with resolved hash
-      expect(mockMetadataManager.set).toHaveBeenCalledWith('testKey', {
+      expect(mockMetadataManager.recordSyncedState).toHaveBeenCalledWith('testKey', {
         syncStatus: SyncStatus.Synced,
         digest: computeHash(remoteValue), // Should use remote value hash
         version: expect.any(Number), // Should use current timestamp
-      }, false); // Don't schedule remote sync during hydration
+      });
     });
 
     it('should skip integrity checks after successful conflict resolution', async () => {
@@ -949,7 +983,7 @@ describe('SyncController Tests', () => {
       mockMetadataManager.getRemoteMetadataOnly.mockResolvedValue(remoteMetadata);
 
       // Execute hydration
-      const result = await syncController.hydrate(['testKey']);
+      const result = await syncEngine.hydrate(['testKey']);
 
       // Verify results
       expect(result.success).toBe(true);
@@ -957,14 +991,14 @@ describe('SyncController Tests', () => {
       
       // Verify that metadata.set was called only once (for conflict resolution)
       // and not again for integrity checks
-      expect(mockMetadataManager.set).toHaveBeenCalledTimes(1);
+      expect(mockMetadataManager.recordSyncedState).toHaveBeenCalledTimes(1);
       
       // Verify the metadata was set with resolved value hash
-      expect(mockMetadataManager.set).toHaveBeenCalledWith('testKey', {
+      expect(mockMetadataManager.recordSyncedState).toHaveBeenCalledWith('testKey', {
         syncStatus: SyncStatus.Synced,
         digest: computeHash(localValue), // Local value hash (local-wins)
         version: expect.any(Number),
-      }, false); // Don't schedule remote sync during hydration
+      });
     });
 
     // Note: Testing conflict resolution failure is complex with static methods
@@ -997,27 +1031,27 @@ describe('SyncController Tests', () => {
       mockFirestore.fetch.mockResolvedValue(remoteValue);
 
       // Execute hydration
-      await syncController.hydrate();
+      await syncEngine.hydrate();
 
       // Verify metadata was updated with remote version
-      expect(mockMetadataManager.set).toHaveBeenCalledWith('testKey', {
+      expect(mockMetadataManager.recordSyncedState).toHaveBeenCalledWith('testKey', {
         syncStatus: SyncStatus.Synced,
         digest: remoteMetadata.digest,
         version: remoteMetadata.version,
-      }, false); // Don't schedule remote sync during hydration
+      });
     });
 
     it('should handle metadata updates', async () => {
       // Update metadata for a key
-      syncController.markAsPending('testKey');
+      syncEngine.markAsPending('testKey');
       jest.runAllTimers();
 
       // Verify metadata was updated
-      expect(mockMetadataManager.set).toHaveBeenCalledWith('testKey', expect.objectContaining({
+      expect(mockMetadataManager.recordLocalChange).toHaveBeenCalledWith('testKey', expect.objectContaining({
         syncStatus: SyncStatus.Pending,
         digest: expect.any(String),
         version: expect.any(Number)
-      }), true); // Should schedule remote sync when autosync is enabled
+      }));
       // With batching, we expect one operation per unique key
       expect(mockOperationRepo.addOperation).toHaveBeenCalledTimes(1);
     });
@@ -1031,7 +1065,7 @@ describe('SyncController Tests', () => {
       });
 
       // Mark key as deleted
-      syncController.markAsDeleted('testKey');
+      syncEngine.markAsDeleted('testKey');
 
       // Verify metadata was updated - markAsDeleted uses updateSyncStatus, not set
       expect(mockMetadataManager.updateSyncStatus).toHaveBeenCalledWith('testKey', SyncStatus.Pending);
@@ -1043,7 +1077,7 @@ describe('SyncController Tests', () => {
       mockFirestore.fetch.mockResolvedValue('test value');
 
       // Execute restore
-      await syncController.restore();
+      await syncEngine.restore();
 
       // Verify metadata was hydrated
       expect(mockMetadataManager.hydrateMetadata).toHaveBeenCalled();
@@ -1066,14 +1100,14 @@ describe('SyncController Tests', () => {
       mockMetadataManager.getRemoteMetadataOnly.mockResolvedValue(remoteMetadata);
 
       // Execute hydration
-      await syncController.hydrate();
+      await syncEngine.hydrate();
 
       // Verify metadata was updated
-      expect(mockMetadataManager.set).toHaveBeenCalledWith('testKey', {
+      expect(mockMetadataManager.recordSyncedState).toHaveBeenCalledWith('testKey', {
         syncStatus: SyncStatus.Synced,
         digest: remoteMetadata.digest,
         version: remoteMetadata.version,
-      }, false); // Don't schedule remote sync during hydration
+      });
     });
   });
 
@@ -1091,7 +1125,7 @@ describe('SyncController Tests', () => {
       ]);
 
       // Execute sync all
-      const result = await syncController.syncAll();
+      const result = await syncEngine.syncAll();
 
       // Verify results
       expect(result.success).toBe(true);
@@ -1109,7 +1143,7 @@ describe('SyncController Tests', () => {
       ]);
 
       // Execute sync all
-      const result = await syncController.syncAll();
+      const result = await syncEngine.syncAll();
 
       // Verify results
       expect(result.success).toBe(false);
@@ -1126,8 +1160,8 @@ describe('SyncController Tests', () => {
       });
       mockOperationRepo.processOperations.mockResolvedValue([]);
 
-      const markSpy = jest.spyOn(syncController, 'markAsDeleted');
-      const result = await syncController.syncAll();
+      const markSpy = jest.spyOn(syncEngine, 'markAsDeleted');
+      const result = await syncEngine.syncAll();
 
       expect(markSpy).not.toHaveBeenCalled();
       expect(result.backedUpKeys).toHaveLength(0);
@@ -1141,14 +1175,14 @@ describe('SyncController Tests', () => {
       mockUserManager.isUserLoggedIn.mockReturnValue(true);
       mockMetadataManager.probeRemoteTenure.mockResolvedValue({ present: true, errors: [] });
 
-      await expect(syncController.probeRemoteData()).resolves.toEqual({ status: 'present' });
+      await expect(syncEngine.probeRemoteData()).resolves.toEqual({ status: 'present' });
     });
 
     it('returns absent when every key is empty with no errors', async () => {
       mockUserManager.isUserLoggedIn.mockReturnValue(true);
       mockMetadataManager.probeRemoteTenure.mockResolvedValue({ present: false, errors: [] });
 
-      await expect(syncController.probeRemoteData()).resolves.toEqual({ status: 'absent' });
+      await expect(syncEngine.probeRemoteData()).resolves.toEqual({ status: 'absent' });
     });
 
     it('returns indeterminate when probe reads fail (does not collapse to absent)', async () => {
@@ -1158,7 +1192,7 @@ describe('SyncController Tests', () => {
         errors: ['testDoc: denied'],
       });
 
-      const result = await syncController.probeRemoteData();
+      const result = await syncEngine.probeRemoteData();
       expect(result.status).toBe('indeterminate');
       if (result.status === 'indeterminate') {
         expect(result.reason).toContain('denied');
@@ -1178,13 +1212,13 @@ describe('SyncController Tests', () => {
       const remoteVersion = 1_700_000_000_000;
       const computeHash = require('../../utils/computeHash').default;
       mockFirestore.fetch.mockResolvedValue(remoteValue);
-      mockMetadataManager.getRemoteMetadataOnly.mockResolvedValue({
-        digest: 'remote-digest-ignored',
-        version: remoteVersion,
+      mockMetadataManager.getRemoteMetaForKey.mockReturnValue({
+        d: 'remote-digest-ignored',
+        v: remoteVersion,
       });
 
       // Execute restore
-      const result = await syncController.restore();
+      const result = await syncEngine.restore();
 
       // Verify results
       expect(result.success).toBe(true);
@@ -1192,27 +1226,27 @@ describe('SyncController Tests', () => {
       expect(result.failedKeys).toHaveLength(0);
       expect(mockStorage.set).toHaveBeenCalledWith('testKey', remoteValue);
       // Digest recomputed locally; version copied from remote (not Date.now())
-      expect(mockMetadataManager.set).toHaveBeenCalledWith('testKey', {
+      expect(mockMetadataManager.recordSyncedState).toHaveBeenCalledWith('testKey', {
         syncStatus: SyncStatus.Synced,
         digest: computeHash(remoteValue),
         version: remoteVersion,
-      }, false);
+      });
     });
 
     it('restore seeds version 0 when remote metadata is missing (fail toward re-hydrate, not clobber)', async () => {
       const remoteValue = 'orphaned-value';
       const computeHash = require('../../utils/computeHash').default;
       mockFirestore.fetch.mockResolvedValue(remoteValue);
-      mockMetadataManager.getRemoteMetadataOnly.mockResolvedValue(undefined);
+      mockMetadataManager.getRemoteMetaForKey.mockReturnValue(undefined);
 
-      const result = await syncController.restore();
+      const result = await syncEngine.restore();
 
       expect(result.success).toBe(true);
-      expect(mockMetadataManager.set).toHaveBeenCalledWith('testKey', {
+      expect(mockMetadataManager.recordSyncedState).toHaveBeenCalledWith('testKey', {
         syncStatus: SyncStatus.Synced,
         digest: computeHash(remoteValue),
         version: 0,
-      }, false);
+      });
     });
 
     it('restore on an empty remote returns success with nothing restored (real fetch→undefined path)', async () => {
@@ -1221,7 +1255,7 @@ describe('SyncController Tests', () => {
       // boundary — it must not throw, must not write, and must report success with 0 keys.
       mockFirestore.fetch.mockResolvedValue(undefined);
 
-      const result = await syncController.restore();
+      const result = await syncEngine.restore();
 
       expect(result.success).toBe(true);
       expect(result.restoredKeys).toHaveLength(0);
@@ -1235,7 +1269,7 @@ describe('SyncController Tests', () => {
       mockFirestore.fetch.mockRejectedValue(new Error('Restore failed'));
 
       // Execute restore
-      const result = await syncController.restore();
+      const result = await syncEngine.restore();
 
       // Verify results
       expect(result.success).toBe(false);
@@ -1253,20 +1287,20 @@ describe('SyncController Tests', () => {
         anotherKey: 99,
       };
 
-      mockFirestore.fetch.mockImplementation(async (key: string) => remoteByKey[key]);
-      mockMetadataManager.getRemoteMetadataOnly.mockImplementation(async (key: string) => ({
-        digest: 'remote-ignored',
-        version: key === 'testKey' ? 111 : 222,
+      mockFirestore.fetch.mockImplementation(async (key: Extract<keyof TestStorage, string>) => remoteByKey[String(key)]);
+      mockMetadataManager.getRemoteMetaForKey.mockImplementation((key: string) => ({
+        d: 'remote-ignored',
+        v: key === 'testKey' ? 111 : 222,
       }));
 
       // Track seeded digests so get() reflects restore's metadata writes
       const seeded = new Map<string, LocalSyncMetadata>();
-      mockMetadataManager.set.mockImplementation(async (key: string, metadata: LocalSyncMetadata) => {
+      mockMetadataManager.recordSyncedState.mockImplementation(async (key: string, metadata: LocalSyncMetadata) => {
         seeded.set(key, metadata);
       });
       mockMetadataManager.get.mockImplementation((key: string) => seeded.get(key));
 
-      const result = await syncController.restore();
+      const result = await syncEngine.restore();
       expect(result.success).toBe(true);
       expect(result.restoredKeys).toEqual(expect.arrayContaining(['testKey', 'anotherKey']));
       expect(seeded.get('testKey')?.digest).toBe(computeHash(remoteByKey.testKey));
@@ -1279,7 +1313,7 @@ describe('SyncController Tests', () => {
       mockOperationRepo.addOperation.mockClear();
       mockOperationRepo.processOperations.mockResolvedValue([]);
 
-      const backup = await syncController.syncAll();
+      const backup = await syncEngine.syncAll();
 
       expect(mockOperationRepo.addOperation).not.toHaveBeenCalled();
       expect(backup.backedUpKeys).toHaveLength(0);
@@ -1295,7 +1329,7 @@ describe('SyncController Tests', () => {
       mockMetadataManager.needsHydration.mockResolvedValue(true);
 
       // Execute operation
-      const result = await syncController.hydrate();
+      const result = await syncEngine.hydrate();
 
       // Verify results
       expect(result.success).toBe(false);
@@ -1308,7 +1342,7 @@ describe('SyncController Tests', () => {
       mockMetadataManager.needsHydration.mockResolvedValue(true);
 
       // Execute operation
-      const result = await syncController.hydrate();
+      const result = await syncEngine.hydrate();
 
       // Verify results
       expect(result.success).toBe(true);
@@ -1329,7 +1363,7 @@ describe('SyncController Tests', () => {
       };
 
       // Create new controller with many keys
-      const controller = new SyncController(
+      const controller = new SyncEngine(
         mockStorage,
         mockFirestore,
         mockMetadataManager,
@@ -1367,12 +1401,12 @@ describe('SyncController Tests', () => {
       mockOperationRepo.processOperations.mockReturnValue(syncPromise as any);
 
       // Start sync
-      const syncInProgress = syncController.syncPending();
+      const syncInProgress = syncEngine.syncPending();
 
       // Perform other operations while sync is in progress
       // Add different keys to test batching
-      syncController.markAsPending('testKey');
-      syncController.markAsDeleted('anotherKey');
+      syncEngine.markAsPending('testKey');
+      syncEngine.markAsDeleted('anotherKey');
       jest.runAllTimers();
 
       // With batching, we expect one operation per unique key
@@ -1392,7 +1426,7 @@ describe('SyncController Tests', () => {
         syncInterval: 1000 // 1 second
       };
 
-      const controller = new SyncController(
+      const controller = new SyncEngine(
         mockStorage,
         mockFirestore,
         mockMetadataManager,
@@ -1414,7 +1448,7 @@ describe('SyncController Tests', () => {
         syncInterval: 1000
       };
 
-      const controller = new SyncController(
+      const controller = new SyncEngine(
         mockStorage,
         mockFirestore,
         mockMetadataManager,
@@ -1432,7 +1466,7 @@ describe('SyncController Tests', () => {
         syncInterval: 1000
       };
 
-      const controller = new SyncController(
+      const controller = new SyncEngine(
         mockStorage,
         mockFirestore,
         mockMetadataManager,
@@ -1460,7 +1494,7 @@ describe('SyncController Tests', () => {
       mockOperationRepo.processOperations.mockResolvedValue([{ success: true, key: 'testKey' }]);
 
       // Execute sync
-      await syncController.syncPending();
+      await syncEngine.syncPending();
 
       // Verify lastBackup was updated locally
       expect(mockStorage.set).toHaveBeenCalledWith('lastBackup', expect.any(Number));
@@ -1478,7 +1512,7 @@ describe('SyncController Tests', () => {
       mockOperationRepo.processOperations.mockResolvedValue([]);
 
       // Execute sync
-      await syncController.syncPending();
+      await syncEngine.syncPending();
 
       // Verify lastBackup was not updated locally
       expect(mockStorage.set).not.toHaveBeenCalledWith('lastBackup', expect.any(Number));
@@ -1494,7 +1528,7 @@ describe('SyncController Tests', () => {
       mockOperationRepo.processOperations.mockResolvedValue([{ success: true, key: 'testKey' }]);
 
       // Execute sync all
-      await syncController.syncAll();
+      await syncEngine.syncAll();
 
       // Verify lastBackup was updated locally
       expect(mockStorage.set).toHaveBeenCalledWith('lastBackup', expect.any(Number));
@@ -1513,7 +1547,7 @@ describe('SyncController Tests', () => {
       mockOperationRepo.processOperations.mockResolvedValue([]);
 
       // Execute sync all
-      await syncController.syncAll();
+      await syncEngine.syncAll();
 
       // Verify lastBackup was not updated locally
       expect(mockStorage.set).not.toHaveBeenCalledWith('lastBackup', expect.any(Number));
@@ -1531,7 +1565,7 @@ describe('SyncController Tests', () => {
       ]);
 
       // Execute sync
-      await syncController.syncPending();
+      await syncEngine.syncPending();
 
       // Verify lastBackup was updated only once locally
       expect(mockStorage.set).toHaveBeenCalledTimes(1);
@@ -1547,8 +1581,8 @@ describe('SyncController Tests', () => {
       mockOperationRepo.processOperations.mockResolvedValue([{ success: true, key: 'testKey' }]);
 
       // Mark key as deleted and sync
-      syncController.markAsDeleted('testKey');
-      await syncController.syncPending();
+      syncEngine.markAsDeleted('testKey');
+      await syncEngine.syncPending();
 
       // Verify lastBackup was updated locally
       expect(mockStorage.set).toHaveBeenCalledWith('lastBackup', expect.any(Number));
@@ -1563,7 +1597,7 @@ describe('SyncController Tests', () => {
       mockOperationRepo.processOperations.mockResolvedValue([{ success: true, key: 'testKey' }]);
 
       // Execute sync
-      await syncController.syncPending();
+      await syncEngine.syncPending();
 
       // Get the timestamp that was set locally
       const lastBackupCall = mockStorage.set.mock.calls.find(call => call[0] === 'lastBackup');
@@ -1582,7 +1616,7 @@ describe('SyncController Tests', () => {
       mockOperationRepo.processOperations.mockResolvedValue([{ success: true, key: 'testKey' }]);
 
       // Execute sync
-      await syncController.syncPending();
+      await syncEngine.syncPending();
 
       // Verify lastBackup was updated locally
       expect(mockStorage.set).toHaveBeenCalledWith('lastBackup', expect.any(Number));
@@ -1599,7 +1633,7 @@ describe('SyncController Tests', () => {
       mockOperationRepo.processOperations.mockResolvedValue([{ success: true, key: 'testKey' }]);
 
       // Execute sync - should not throw
-      await expect(syncController.syncPending()).resolves.not.toThrow();
+      await expect(syncEngine.syncPending()).resolves.not.toThrow();
 
       // Verify lastBackup was still updated locally despite remote error
       expect(mockStorage.set).toHaveBeenCalledWith('lastBackup', expect.any(Number));
@@ -1619,11 +1653,11 @@ describe('SyncController Tests', () => {
       mockFirestore.backupLastBackupToUserDocument.mockReturnValue(slowWrite);
       mockOperationRepo.processOperations.mockResolvedValue([{ success: true, key: 'testKey' }]);
 
-      await syncController.syncPending();
+      await syncEngine.syncPending();
       expect(mockFirestore.backupLastBackupToUserDocument).toHaveBeenCalledTimes(1);
 
       let cancelSettled = false;
-      const cancelPromise = syncController.cancelPendingOperations().then(() => {
+      const cancelPromise = syncEngine.cancelPendingOperations().then(() => {
         cancelSettled = true;
       });
 
@@ -1651,7 +1685,7 @@ describe('SyncController Tests', () => {
     it('should skip hydration when user is not logged in', async () => {
       mockUserManager.isUserLoggedIn.mockReturnValue(false);
 
-      const result = await syncController.hydrate();
+      const result = await syncEngine.hydrate();
 
       expect(result.success).toBe(false);
       expect(result.restoredKeys).toHaveLength(0);
@@ -1687,7 +1721,7 @@ describe('SyncController Tests', () => {
       jest.spyOn(require('../../utils/computeHash'), 'default').mockReturnValue(correctDigest);
 
       // Start hydration and run all timers
-      const hydrationPromise = syncController.hydrate();
+      const hydrationPromise = syncEngine.hydrate();
       await jest.runAllTimersAsync();
       await Promise.resolve(); // Flush microtasks
       const result = await hydrationPromise;
@@ -1695,11 +1729,11 @@ describe('SyncController Tests', () => {
       // Verify the retry mechanism worked
       expect(mockMetadataManager.getRemoteMetadataOnly).toHaveBeenCalledTimes(3);
       expect(mockStorage.set).toHaveBeenCalledWith('testKey', testValue);
-      expect(mockMetadataManager.set).toHaveBeenCalledWith('testKey', {
+      expect(mockMetadataManager.recordSyncedState).toHaveBeenCalledWith('testKey', {
         syncStatus: SyncStatus.Synced,
         digest: correctDigest,
         version: 1,
-      }, false); // Don't schedule remote sync during hydration
+      });
       expect(result.success).toBe(true);
       expect(result.restoredKeys).toContain('testKey');
       expect(result.failedKeys).toHaveLength(0);
@@ -1727,7 +1761,7 @@ describe('SyncController Tests', () => {
       jest.spyOn(require('../../utils/computeHash'), 'default').mockReturnValue('different-digest');
 
       // Start hydration with SKIP strategy to test persistent corruption handling
-      const hydrationPromise = syncController.hydrate(['testKey'], undefined, {
+      const hydrationPromise = syncEngine.hydrate(['testKey'], undefined, {
         strategy: IntegrityFailureRecoveryStrategy.SKIP
       });
       await jest.runAllTimersAsync();
@@ -1737,7 +1771,7 @@ describe('SyncController Tests', () => {
       // Verify the retry mechanism was attempted but failed (SKIP strategy doesn't call invalidateCache)
       expect(mockMetadataManager.getRemoteMetadataOnly).toHaveBeenCalledTimes(4);
       expect(mockStorage.set).not.toHaveBeenCalled();
-      expect(mockMetadataManager.set).not.toHaveBeenCalled();
+      expect(mockMetadataManager.recordSyncedState).not.toHaveBeenCalled();
       expect(result.success).toBe(true); // Still true because other keys might succeed
       expect(result.restoredKeys).not.toContain('testKey');
       expect(result.failedKeys).toHaveLength(0);
@@ -1756,12 +1790,12 @@ describe('SyncController Tests', () => {
 
       mockMetadataManager.getRemoteMetadataOnly.mockResolvedValue(undefined);
 
-      const result = await syncController.hydrate();
+      const result = await syncEngine.hydrate();
 
       // When remoteMetadata is undefined, the hydration still succeeds,
       // but no storage/metadata operations are performed
       expect(mockStorage.set).not.toHaveBeenCalled();
-      expect(mockMetadataManager.set).not.toHaveBeenCalled();
+      expect(mockMetadataManager.recordSyncedState).not.toHaveBeenCalled();
       expect(result.success).toBe(true);
       expect(result.restoredKeys).toContain('testKey'); // Still returns true from processKey
       expect(result.failedKeys).toHaveLength(0);
@@ -1777,11 +1811,11 @@ describe('SyncController Tests', () => {
         .mockResolvedValueOnce(false); // anotherKey doesn't need hydration
       mockMetadataManager.getRemoteMetadataOnly.mockRejectedValue(new Error('Metadata consistency error'));
 
-      const result = await syncController.hydrate();
+      const result = await syncEngine.hydrate();
 
       // Verify no hydration occurred due to metadata error
       expect(mockStorage.set).not.toHaveBeenCalled();
-      expect(mockMetadataManager.set).not.toHaveBeenCalled();
+      expect(mockMetadataManager.recordSyncedState).not.toHaveBeenCalled();
       expect(result.success).toBe(false);
       expect(result.restoredKeys).toHaveLength(0);
       expect(result.failedKeys).toContain('testKey');
@@ -1805,16 +1839,55 @@ describe('SyncController Tests', () => {
         throw new Error('Hash computation failed');
       });
 
-      const resultPromise = syncController.hydrate();
+      const resultPromise = syncEngine.hydrate();
       await jest.runAllTimersAsync();
       const result = await resultPromise;
 
       // Verify no hydration occurred due to hash computation error
       expect(mockStorage.set).not.toHaveBeenCalled();
-      expect(mockMetadataManager.set).not.toHaveBeenCalled();
+      expect(mockMetadataManager.recordSyncedState).not.toHaveBeenCalled();
       expect(result.success).toBe(false);
       expect(result.restoredKeys).toHaveLength(0);
       expect(result.failedKeys).toContain('testKey');
+    });
+
+    it('calls onHydrationComplete before rethrowing when hydrate fails catastrophically', async () => {
+      const onHydrationComplete = jest.fn();
+      const configWithCallback = {
+        ...mockConfig,
+        eventCallbacks: { onHydrationComplete },
+      } as GanonConfig<TestStorage>;
+      const engine = new SyncEngine(
+        mockStorage,
+        mockFirestore,
+        mockMetadataManager,
+        mockOperationRepo,
+        mockUserManager,
+        configWithCallback
+      );
+
+      jest.spyOn(engine as any, '_processKeys').mockRejectedValue(new Error('catastrophic hydrate failure'));
+
+      await expect(engine.hydrate()).rejects.toThrow('catastrophic hydrate failure');
+      expect(onHydrationComplete).toHaveBeenCalledTimes(1);
+      expect(onHydrationComplete).toHaveBeenCalledWith(
+        expect.objectContaining({
+          success: false,
+          restoredKeys: [],
+          failedKeys: [],
+          integrityFailures: [],
+        })
+      );
+    });
+
+    it('start() swallows hydrate rejection without unhandled promise rejection', async () => {
+      const hydrateSpy = jest.spyOn(syncEngine, 'hydrate').mockRejectedValue(new Error('start hydrate failed'));
+
+      syncEngine.start();
+      await Promise.resolve();
+
+      expect(hydrateSpy).toHaveBeenCalledTimes(1);
+      hydrateSpy.mockRestore();
     });
   });
 });

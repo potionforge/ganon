@@ -13,5 +13,10 @@ module.exports = {
   },
   transformIgnorePatterns: [
     'node_modules/(?!(expo-network|expo-modules-core)/)'
-  ]
+  ],
+  collectCoverageFrom: [
+    'src/**/*.ts',
+    '!src/**/__tests__/**',
+    '!src/**/__mocks__/**',
+  ],
 }; 

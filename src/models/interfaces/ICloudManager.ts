@@ -11,8 +11,12 @@ export interface ICloudManager<T extends BaseStorageMapping> {
   identifierKey: string;
   cloudConfig: CloudBackupConfig<T>;
 
-  // Cloud operations
-  backup(key: Extract<keyof T, string>, value: any): Promise<void>;
+  // Cloud operations — digest/version required so in-document digests cannot be skipped silently
+  backup(
+    key: Extract<keyof T, string>,
+    value: any,
+    options: { digest: string; version: number }
+  ): Promise<void>;
   fetch(key: Extract<keyof T, string>): Promise<T[keyof T] | undefined>;
   delete(key: Extract<keyof T, string>): Promise<void>;
   dangerouslyDelete(): Promise<void>;

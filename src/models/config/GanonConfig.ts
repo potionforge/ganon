@@ -5,6 +5,7 @@ import { IntegrityFailureConfig } from "./IntegrityFailureConfig";
 import { ConflictResolutionConfig } from "./ConflictResolutionConfig";
 import type { BackupResult } from "../sync/BackupResult";
 import type { RestoreResult } from "../sync/RestoreResult";
+import type { DigestReadMode } from "../../metadata/digest/selectRemoteDigest";
 
 /**
  * Main configuration interface for Ganon synchronization system.
@@ -26,9 +27,10 @@ export interface GanonConfig<T extends BaseStorageMapping> {
   cloudConfig: CloudBackupConfig<T>;
 
   /**
-   * Whether to automatically start the sync interval on initialization.
-   * If true, sync operations will run periodically based on syncInterval.
-   * Default: true
+   * Whether to automatically start the sync interval and hydration on init/login,
+   * and whether local metadata changes schedule remote legacy-map flushes.
+   * When omitted, resolves to `true` via `resolveGanonConfig` (sync interval,
+   * hydration, and metadata flush scheduling all enabled).
    */
   autoStartSync?: boolean;
 
@@ -65,10 +67,30 @@ export interface GanonConfig<T extends BaseStorageMapping> {
    * If not specified, uses default values from _conflictResolutionConfig.
    */
   conflictResolutionConfig?: Partial<ConflictResolutionConfig>;
+
+  /**
+   * How remote digests are read during hydration and metadata fetch.
+   * - 'legacy': remote_metadata map only
+   * - 'dual': higher version across in-document digestMap and legacy map (default)
+   * - 'v2': in-document digestMap only
+   */
+  digestReadMode?: DigestReadMode;
+
+  /**
+   * Guard writes while hydration is pending after login.
+   * Only applies when user is logged in; guest writes are never blocked.
+   */
+  earlyWriteGuard?: 'off' | 'warn' | 'throw';
+
+  /**
+   * When true, debounced flushes write the legacy remote_metadata map (step 6.1 dual-write).
+   * Defaults to true until step 6.3 sunset; set false only after fleet gate passes.
+   */
+  legacyMetadataWrites?: boolean;
 }
 
 /**
- * Internal config type used only when wiring Ganon → DependencyFactory → SyncController.
+ * Internal config type used only when wiring Ganon → DependencyFactory → SyncEngine.
  * Extends the public config with event callbacks. Not part of the public API.
  */
 export interface InternalGanonConfig<T extends BaseStorageMapping> extends GanonConfig<T> {

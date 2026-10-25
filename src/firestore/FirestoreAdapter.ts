@@ -15,10 +15,11 @@ import { GanonConfig } from '../models/config/GanonConfig';
 import { BaseStorageMapping } from '../models/storage/BaseStorageMapping';
 
 class FirestoreAdapter<T extends BaseStorageMapping> implements IFirestoreAdapter {
-  private firestore = getFirestore();
+  private firestore: FirebaseFirestoreTypes.Module;
   private _remoteReadonly: boolean;
 
-  constructor(readonly config: GanonConfig<T>) {
+  constructor(readonly config: GanonConfig<T>, firestore?: FirebaseFirestoreTypes.Module) {
+    this.firestore = firestore ?? getFirestore();
     this._remoteReadonly = config.remoteReadonly ?? false;
   }
 

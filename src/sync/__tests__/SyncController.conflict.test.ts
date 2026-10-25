@@ -1,4 +1,4 @@
-import SyncController from '../SyncController';
+import SyncEngine from '../SyncEngine';
 import StorageManager from '../../managers/StorageManager';
 import FirestoreManager from '../../firestore/FirestoreManager';
 import MetadataManager from '../../metadata/MetadataManager';
@@ -20,8 +20,8 @@ jest.mock('../OperationRepo');
 jest.mock('../../managers/UserManager');
 jest.mock('../../utils/Log');
 
-describe('SyncController Conflict Handling', () => {
-  let syncController: SyncController<any>;
+describe('SyncEngine Conflict Handling', () => {
+  let syncEngine: SyncEngine<any>;
   let mockStorage: jest.Mocked<StorageManager<any>>;
   let mockFirestore: jest.Mocked<FirestoreManager<any>>;
   let mockMetadataManager: jest.Mocked<MetadataManager<any>>;
@@ -42,6 +42,9 @@ describe('SyncController Conflict Handling', () => {
     mockFirestore = {} as jest.Mocked<FirestoreManager<any>>;
     mockMetadataManager = {
       set: jest.fn().mockResolvedValue(undefined),
+      recordLocalChange: jest.fn().mockResolvedValue(undefined),
+      recordSyncedState: jest.fn().mockResolvedValue(undefined),
+      isNeverSynced: jest.fn().mockReturnValue(false),
       get: jest.fn(),
       updateSyncStatus: jest.fn()
     } as unknown as jest.Mocked<MetadataManager<any>>;
@@ -64,8 +67,8 @@ describe('SyncController Conflict Handling', () => {
       }
     };
 
-    // Create SyncController instance
-    syncController = new SyncController(
+    // Create SyncEngine instance
+    syncEngine = new SyncEngine(
       mockStorage,
       mockFirestore,
       mockMetadataManager,
@@ -82,7 +85,7 @@ describe('SyncController Conflict Handling', () => {
         cloudConfig: {}
       };
 
-      const controller = new SyncController(
+      const controller = new SyncEngine(
         mockStorage,
         mockFirestore,
         mockMetadataManager,
@@ -113,7 +116,7 @@ describe('SyncController Conflict Handling', () => {
         conflictResolutionConfig: customConfig
       };
 
-      const controller = new SyncController(
+      const controller = new SyncEngine(
         mockStorage,
         mockFirestore,
         mockMetadataManager,
@@ -151,9 +154,9 @@ describe('SyncController Conflict Handling', () => {
       };
 
       // Call private method for testing
-      (syncController as any)._trackConflict(conflictInfo);
+      (syncEngine as any)._trackConflict(conflictInfo);
 
-      const trackedConflicts = syncController.getTrackedConflicts();
+      const trackedConflicts = syncEngine.getTrackedConflicts();
       expect(trackedConflicts).toHaveLength(1);
       expect(trackedConflicts[0]).toEqual(conflictInfo);
     });
@@ -168,7 +171,7 @@ describe('SyncController Conflict Handling', () => {
         }
       };
 
-      const controller = new SyncController(
+      const controller = new SyncEngine(
         mockStorage,
         mockFirestore,
         mockMetadataManager,
@@ -201,7 +204,7 @@ describe('SyncController Conflict Handling', () => {
         }
       };
 
-      const controller = new SyncController(
+      const controller = new SyncEngine(
         mockStorage,
         mockFirestore,
         mockMetadataManager,
@@ -257,11 +260,11 @@ describe('SyncController Conflict Handling', () => {
         detectedAt: Date.now(),
       };
 
-      (syncController as any)._trackConflict(conflictInfo);
-      expect(syncController.getTrackedConflicts()).toHaveLength(1);
+      (syncEngine as any)._trackConflict(conflictInfo);
+      expect(syncEngine.getTrackedConflicts()).toHaveLength(1);
 
-      syncController.clearTrackedConflicts();
-      expect(syncController.getTrackedConflicts()).toHaveLength(0);
+      syncEngine.clearTrackedConflicts();
+      expect(syncEngine.getTrackedConflicts()).toHaveLength(0);
     });
   });
 
@@ -284,7 +287,7 @@ describe('SyncController Conflict Handling', () => {
         detectedAt: Date.now(),
       };
 
-      (syncController as any)._notifyConflict(conflictInfo);
+      (syncEngine as any)._notifyConflict(conflictInfo);
 
       expect(Log.warn).toHaveBeenCalledWith(
         expect.stringContaining('Data conflict notification for key test-key')
@@ -307,7 +310,7 @@ describe('SyncController Conflict Handling', () => {
         }
       };
 
-      const controller = new SyncController(
+      const controller = new SyncEngine(
         mockStorage,
         mockFirestore,
         mockMetadataManager,
@@ -343,7 +346,7 @@ describe('SyncController Conflict Handling', () => {
         digest: 'hash2'
       };
 
-      const result = await (syncController as any)._checkAndResolveConflicts(
+      const result = await (syncEngine as any)._checkAndResolveConflicts(
         'test-key',
         localValue,
         remoteValue,
@@ -353,12 +356,11 @@ describe('SyncController Conflict Handling', () => {
 
       expect(result).toBe(true);
       expect(mockStorage.set).toHaveBeenCalledWith('test-key', remoteValue);
-      expect(mockMetadataManager.set).toHaveBeenCalledWith(
+      expect(mockMetadataManager.recordSyncedState).toHaveBeenCalledWith(
         'test-key',
         expect.objectContaining({
           syncStatus: SyncStatus.Synced
-        }),
-        false // Don't schedule remote sync during hydration
+        })
       );
     });
 
@@ -374,7 +376,7 @@ describe('SyncController Conflict Handling', () => {
         digest: 'hash1'
       };
 
-      const result = await (syncController as any)._checkAndResolveConflicts(
+      const result = await (syncEngine as any)._checkAndResolveConflicts(
         'test-key',
         value,
         value, // Same value = no conflict

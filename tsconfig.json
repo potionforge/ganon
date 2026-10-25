@@ -2,7 +2,7 @@
   "compilerOptions": {
     /* Lib/Target settings */
     "target": "es2018",
-    "lib": ["es2018", "dom"],
+    "lib": ["es2020", "dom"],
 
     /* Module resolution */
     "module": "esnext",

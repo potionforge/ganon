@@ -1,6 +1,6 @@
 {
   "name": "@potionforge/ganon",
-  "version": "1.0.0-beta.6.3",
+  "version": "1.0.0-beta.7",
   "description": "React Native Ganon SDK provides seamless storage management and cloud backup capabilities using Firestore and a local storage manager (MMKV).",
   "main": "dist/index.cjs",
   "module": "dist/index.mjs",
@@ -16,7 +16,10 @@
   ],
   "scripts": {
     "copydiff": "bash scripts/copydiff.sh",
-    "test": "jest",
+    "typecheck": "tsc --noEmit -p tsconfig.typecheck.json",
+    "typecheck:all": "tsc --noEmit",
+    "typecheck:ratchet": "node scripts/typecheck-ratchet.mjs",
+    "test": "pnpm run typecheck && pnpm run typecheck:ratchet && jest",
     "build": "tsup",
     "prepare": "pnpm run build",
     "prepublishOnly": "pnpm test && pnpm run build"
@@ -39,6 +42,7 @@
   "homepage": "https://github.com/potionforge/ganon#readme",
   "packageManager": "pnpm@11.1.3",
   "devDependencies": {
+    "@jest/globals": "^29.7.0",
     "@react-native-firebase/app": "^21.14.0",
     "@react-native-firebase/firestore": "^21.14.0",
     "@types/jest": "^29.5.14",

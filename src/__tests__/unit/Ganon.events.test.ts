@@ -26,7 +26,9 @@ const mockStorageManager: any = {
   clearAllData: jest.fn(),
 };
 
-const mockSyncController: any = {
+const mockSyncEngine: any = {
+  start: jest.fn(),
+  stop: jest.fn(),
   startSyncInterval: jest.fn(),
   stopSyncInterval: jest.fn(),
   cancelPendingOperations: jest.fn().mockResolvedValue(undefined),
@@ -46,7 +48,7 @@ const mockUserManager: any = {
 
 const mockDeps = {
   storageManager: mockStorageManager,
-  syncController: mockSyncController,
+  syncEngine: mockSyncEngine,
   firestoreManager: mockFirestoreManager,
   networkMonitor: mockNetworkMonitor,
   userManager: mockUserManager,
@@ -87,8 +89,8 @@ describe('Ganon events API', () => {
     mockUserManager.getCurrentUser.mockReturnValue(undefined);
     mockUserManager.isUserLoggedIn.mockReturnValue(false);
     mockStorageManager.get.mockReturnValue(undefined);
-    mockSyncController.syncAll.mockResolvedValue(backupResult);
-    mockSyncController.restore.mockResolvedValue(restoreResult);
+    mockSyncEngine.syncAll.mockResolvedValue(backupResult);
+    mockSyncEngine.restore.mockResolvedValue(restoreResult);
     ganon = new Ganon<TestStorage>(config);
   });
 

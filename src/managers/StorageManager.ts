@@ -1,16 +1,17 @@
 import { MMKV } from "react-native-mmkv";
 import { IStorageManager } from "../models/interfaces/IStorageManager";
 import { BaseStorageMapping } from "../models/storage/BaseStorageMapping";
+import { KeyValueStore } from "../ports/KeyValueStore";
 import Log from "../utils/Log";
 import { METADATA_KEY } from "../constants";
 export default class StorageManager<T extends BaseStorageMapping> implements IStorageManager<T> {
-  private storage: MMKV;
+  private storage: KeyValueStore;
   private cache: Partial<T> = {};
   private static readonly MAX_CACHE_SIZE = 100;
   private cacheKeys: string[] = []; // track access order
 
-  constructor() {
-    this.storage = new MMKV();
+  constructor(kv?: KeyValueStore) {
+    this.storage = kv ?? new MMKV();
   }
 
   get<K extends keyof T>(dbKey: K): T[K] | undefined {
