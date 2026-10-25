@@ -76,9 +76,10 @@ export type SixTwoHarness = {
 export function createSixTwoStack(
   config: InternalGanonConfig<SixTwoStorage>,
   userId: string = SIX_TWO_USER,
-  operationsKvInput?: KeyValueStore
+  operationsKvInput?: KeyValueStore,
+  fakeInput?: FakeFirestore
 ): SixTwoHarness {
-  const fake = new FakeFirestore();
+  const fake = fakeInput ?? new FakeFirestore();
   const scheduler = new FakeScheduler();
   const clock = new FakeClock();
   clock.set(1_700_000_000_000);

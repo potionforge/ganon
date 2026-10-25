@@ -653,6 +653,15 @@ export default class SyncEngine<T extends BaseStorageMapping> implements ISyncEn
       if (session.isStale()) {
         return false;
       }
+      const remoteMeta = this.metadataManager.getRemoteMetaForKey(key);
+      if (remoteMeta?.d === '') {
+        if (session.isStale()) {
+          return false;
+        }
+        await this._applyRemoteDeleteTombstone(key, session, remoteMeta.v);
+        Log.info(`Ganon: restore skipped key ${String(key)} (remote delete tombstone)`);
+        return false;
+      }
       const value = await this.firestore.fetch(key);
       if (session.isStale()) {
         return false;
@@ -661,7 +670,6 @@ export default class SyncEngine<T extends BaseStorageMapping> implements ISyncEn
         this.storage.set(key, value as T[Extract<keyof T, string>]);
         // Seed local digests from the restored value (same invariant hydrate maintains).
         const localDigest = computeHash(value);
-        const remoteMeta = this.metadataManager.getRemoteMetaForKey(key);
         await this.metadataManager.recordSyncedState(key, {
           syncStatus: SyncStatus.Synced,
           digest: localDigest,
@@ -726,6 +734,24 @@ export default class SyncEngine<T extends BaseStorageMapping> implements ISyncEn
           if (session.isStale()) {
             return false;
           }
+          let remoteMetadata = await this.metadataManager.getRemoteMetadataOnly(key);
+          if (session.isStale()) {
+            return false;
+          }
+          const localMetadata = this.metadataManager.get(key);
+          if (
+            remoteMetadata &&
+            remoteMetadata.digest === '' &&
+            remoteMetadata.version > (localMetadata?.version ?? 0)
+          ) {
+            if (session.isStale()) {
+              return false;
+            }
+            await this._applyRemoteDeleteTombstone(key, session, remoteMetadata.version);
+            Log.info(`✅ Ganon: hydrated key ${key} from remote delete tombstone`);
+            return true;
+          }
+
           const remoteValue = await this.firestore.fetch(key);
           if (session.isStale()) {
             return false;
@@ -733,7 +759,9 @@ export default class SyncEngine<T extends BaseStorageMapping> implements ISyncEn
           if (remoteValue !== undefined) {
             const remoteComputedDigest = computeHash(remoteValue);
             // For hydration, we want to get remote metadata without syncing local changes
-            let remoteMetadata = await this.metadataManager.getRemoteMetadataOnly(key);
+            if (!remoteMetadata) {
+              remoteMetadata = await this.metadataManager.getRemoteMetadataOnly(key);
+            }
             if (session.isStale()) {
               return false;
             }
@@ -743,15 +771,15 @@ export default class SyncEngine<T extends BaseStorageMapping> implements ISyncEn
             }
 
             /* C O N F L I C T S */
-            const localMetadata = this.metadataManager.get(key);
+            const localMetadataForConflict = this.metadataManager.get(key);
             const localValue = this.storage.get(key);
 
             // Detect and resolve conflicts before hydration
-            const hasConflict = localMetadata && ConflictResolver.detectConflict<T>(
+            const hasConflict = localMetadataForConflict && ConflictResolver.detectConflict<T>(
               key,
               localValue,
               remoteValue as T[Extract<keyof T, string>] | undefined,
-              localMetadata,
+              localMetadataForConflict,
               remoteMetadata
             );
 
@@ -761,7 +789,7 @@ export default class SyncEngine<T extends BaseStorageMapping> implements ISyncEn
                 key,
                 localValue: this.storage.get(key),
                 remoteValue: remoteValue as T[Extract<keyof T, string>] | undefined,
-                localMetadata,
+                localMetadata: localMetadataForConflict,
                 remoteMetadata,
                 resolutionStrategy: config.strategy,
                 detectedAt: Date.now()
@@ -779,7 +807,7 @@ export default class SyncEngine<T extends BaseStorageMapping> implements ISyncEn
                 await this.metadataManager.recordSyncedState(key, {
                   syncStatus: SyncStatus.Synced,
                   digest: resolvedHash,
-                  version: nextVersion(localMetadata?.version ?? 0, this.clock),
+                  version: nextVersion(localMetadataForConflict?.version ?? 0, this.clock),
                 });
 
                 Log.info(`✅ Ganon: hydrated key ${key} with resolved value (conflict resolved)`);
@@ -1251,6 +1279,20 @@ export default class SyncEngine<T extends BaseStorageMapping> implements ISyncEn
    *   return false;
    * }, "hydrate");
    */
+  private async _applyRemoteDeleteTombstone(
+    key: Extract<keyof T, string>,
+    session: SessionToken,
+    version: number
+  ): Promise<void> {
+    this.storage.remove(key);
+    await this.metadataManager.recordSyncedState(key, {
+      syncStatus: SyncStatus.Synced,
+      digest: '',
+      version,
+    });
+    this.firestore.invalidateSubcollectionReadCache(key, session);
+  }
+
   private async _processKeys(
     processKey: (key: Extract<keyof T, string>) => Promise<boolean>,
     operation: string,
