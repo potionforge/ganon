@@ -71,7 +71,7 @@ describe('FirestoreManager digest writes', () => {
     const raw = getMockStore().get(parentDocPath);
 
     expect(raw[DIGEST_MAP_KEY]).toEqual({
-      settings: { d: 'sub-digest', v: 7 },
+      settings: { d: 'sub-digest', v: 7, k: 'object' },
     });
     expect(raw[`${DIGEST_MAP_KEY}.settings`]).toBeUndefined();
     expect(raw.settings).toBeUndefined();

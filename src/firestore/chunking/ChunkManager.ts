@@ -7,6 +7,7 @@ import { calculateDataSize } from './helpers/sizeUtils';
 import { areChunksEqual } from './helpers/chunkComparison';
 import { checkIfNeedsChunking } from './helpers/chunkValidation';
 import { reconstructChunkedData } from './helpers/chunkReconstruction';
+import { SubcollectionPayloadKind } from '../../models/sync/RemoteDigestEntry';
 import { generateChunks } from './helpers/chunkGeneration';
 import { BaseStorageMapping } from '../../models/storage/BaseStorageMapping';
 import { Scheduler, SystemScheduler } from '../../ports/Scheduler';
@@ -669,8 +670,11 @@ export default class ChunkManager<T extends BaseStorageMapping> {
    * @param snapshot - The collection snapshot containing the chunks
    * @private
    */
-  private reconstructChunkedData(snapshot: FirebaseFirestoreTypes.QuerySnapshot): any {
-    return reconstructChunkedData(snapshot);
+  private reconstructChunkedData(
+    snapshot: FirebaseFirestoreTypes.QuerySnapshot,
+    kindHint?: SubcollectionPayloadKind
+  ): any {
+    return reconstructChunkedData(snapshot, kindHint);
   }
 
   /** Drop cached list snapshot so the next read sees remote deletes (e.g. digest tombstone hydrate). */
@@ -683,7 +687,7 @@ export default class ChunkManager<T extends BaseStorageMapping> {
    */
   async readData(
     collectionRef: FirebaseFirestoreTypes.CollectionReference,
-    options: { requireFresh?: boolean } = {}
+    options: { requireFresh?: boolean; kindHint?: SubcollectionPayloadKind } = {}
   ): Promise<any | undefined> {
     // Wait for any active writes to complete before reading
     const activeLock = this.writeLocks.get(collectionRef.path);
@@ -703,7 +707,7 @@ export default class ChunkManager<T extends BaseStorageMapping> {
       }
 
       // Always reconstruct from chunk_* docs
-      const rawData = this.reconstructChunkedData(snapshot);
+      const rawData = this.reconstructChunkedData(snapshot, options.kindHint);
 
       // Restore data from Firestore format
       return this.dataProcessor.restoreFromFirestore(rawData);

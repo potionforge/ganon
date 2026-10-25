@@ -662,7 +662,7 @@ export default class SyncEngine<T extends BaseStorageMapping> implements ISyncEn
         Log.info(`Ganon: restore skipped key ${String(key)} (remote delete tombstone)`);
         return false;
       }
-      const value = await this.firestore.fetch(key);
+      const value = await this.firestore.fetch(key, { kindHint: remoteMeta?.k });
       if (session.isStale()) {
         return false;
       }
@@ -745,8 +745,9 @@ export default class SyncEngine<T extends BaseStorageMapping> implements ISyncEn
             return true;
           }
           let remoteMetadata = tombstoneCheck.remoteMetadata;
+          const digestKindHint = this.metadataManager.getRemoteMetaForKey(key)?.k;
 
-          const remoteValue = await this.firestore.fetch(key);
+          const remoteValue = await this.firestore.fetch(key, { kindHint: digestKindHint });
           if (session.isStale()) {
             return false;
           }
@@ -951,8 +952,9 @@ export default class SyncEngine<T extends BaseStorageMapping> implements ISyncEn
           return true;
         }
         let remoteMetadata = tombstoneCheck.remoteMetadata;
+        const digestKindHint = this.metadataManager.getRemoteMetaForKey(key)?.k;
 
-        const remoteValue = await this.firestore.fetch(key);
+        const remoteValue = await this.firestore.fetch(key, { kindHint: digestKindHint });
         if (session.isStale()) {
           return false;
         }
@@ -1630,15 +1632,15 @@ export default class SyncEngine<T extends BaseStorageMapping> implements ISyncEn
         return { success: false, recoveryStrategy: STALE_HYDRATION_RECOVERY_STRATEGY };
       }
 
-      // Force a fresh fetch
-      const remoteValue = await this.firestore.fetch(key);
+      const freshDigest = await this.metadataManager.getRemoteMetadataOnly(key);
+      const remoteValue = await this.firestore.fetch(key, { kindHint: freshDigest?.k });
       if (session.isStale()) {
         return { success: false, recoveryStrategy: STALE_HYDRATION_RECOVERY_STRATEGY };
       }
 
       if (remoteValue !== undefined) {
         const newComputedHash = computeHash(remoteValue);
-        const freshMetadata = await this.metadataManager.getRemoteMetadataOnly(key);
+        const freshMetadata = freshDigest;
 
         if (freshMetadata && freshMetadata.digest === newComputedHash) {
           Log.info(`Ganon: Force metadata refresh successful for key ${key}`);
@@ -1727,7 +1729,8 @@ export default class SyncEngine<T extends BaseStorageMapping> implements ISyncEn
 
       Log.info(`Ganon: Using remote data despite integrity failure for key ${key}`);
 
-      const remoteValue = await this.firestore.fetch(key);
+      const remoteDigest = await this.metadataManager.getRemoteMetadataOnly(key);
+      const remoteValue = await this.firestore.fetch(key, { kindHint: remoteDigest?.k });
       if (session.isStale()) {
         return { success: false, recoveryStrategy: STALE_HYDRATION_RECOVERY_STRATEGY };
       }

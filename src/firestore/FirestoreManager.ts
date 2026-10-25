@@ -14,6 +14,7 @@ import ChunkManager from "./chunking/ChunkManager";
 import UserManager from "../managers/UserManager";
 import { Scheduler } from "../ports/Scheduler";
 import { DIGEST_MAP_KEY } from "../constants";
+import { SubcollectionPayloadKind } from "../models/sync/RemoteDigestEntry";
 import SessionToken from "../sync/SessionToken";
 import { guardSessionBeforeIo, requireSessionInTransaction, StaleSessionAbort } from "../sync/sessionGuard";
 
@@ -437,7 +438,10 @@ export default class FirestoreManager<T extends BaseStorageMapping> implements I
     }
   }
 
-  async fetch(key: Extract<keyof T, string>): Promise<T[keyof T] | undefined> {
+  async fetch(
+    key: Extract<keyof T, string>,
+    options?: { kindHint?: SubcollectionPayloadKind }
+  ): Promise<T[keyof T] | undefined> {
     Log.verbose(`Ganon: FirestoreManager.fetch, key: ${String(key)}`);
 
     if (!this.userManager.isUserLoggedIn()) {
@@ -492,7 +496,9 @@ export default class FirestoreManager<T extends BaseStorageMapping> implements I
       } else {
         // For subcollections, use ChunkManager to handle both chunked and non-chunked data
         const collectionRef = ref as FirebaseFirestoreTypes.CollectionReference;
-        const value = await this.chunkManager.readData(collectionRef);
+        const value = await this.chunkManager.readData(collectionRef, {
+          kindHint: options?.kindHint,
+        });
 
         if (value === undefined) {
           return undefined;
@@ -610,12 +616,16 @@ export default class FirestoreManager<T extends BaseStorageMapping> implements I
 
       const keyStr = String(key);
       const sanitizedKey = this.dataProcessor.sanitizeFieldName(keyStr);
-      const tombstone = { d: '', v: version };
-      const digestTombstones: Record<string, { d: string; v: number }> = {
-        [sanitizedKey]: tombstone,
+      const digestTombstoneEntry = {
+        d: '',
+        v: version,
+        k: this.adapter.fieldDelete(),
+      };
+      const digestTombstones: Record<string, unknown> = {
+        [sanitizedKey]: digestTombstoneEntry,
       };
       if (sanitizedKey !== keyStr) {
-        digestTombstones[keyStr] = tombstone;
+        digestTombstones[keyStr] = digestTombstoneEntry;
       }
 
       if (type === DocumentOrCollection.Document) {
@@ -972,13 +982,15 @@ export default class FirestoreManager<T extends BaseStorageMapping> implements I
     await this.chunkManager.writeData(ref, String(key), sanitizedData, { ...options, session });
 
     if (options?.digest !== undefined && options?.version !== undefined && ref.parent) {
+      const payloadKind: SubcollectionPayloadKind = Array.isArray(value) ? 'array' : 'object';
       await this._writeInDocumentDigest(
         ref.parent,
         key,
         options.digest,
         options.version,
         session,
-        options.transaction
+        options.transaction,
+        payloadKind
       );
     }
   }
@@ -992,12 +1004,20 @@ export default class FirestoreManager<T extends BaseStorageMapping> implements I
     digest: string,
     version: number,
     session: SessionToken,
-    transaction?: FirebaseFirestoreTypes.Transaction
+    transaction?: FirebaseFirestoreTypes.Transaction,
+    payloadKind?: SubcollectionPayloadKind
   ): Promise<void> {
     const sanitizedKey = this.dataProcessor.sanitizeFieldName(String(key));
+    const digestEntry: { d: string; v: number; k?: SubcollectionPayloadKind } = {
+      d: digest,
+      v: version,
+    };
+    if (payloadKind) {
+      digestEntry.k = payloadKind;
+    }
     const payload = {
       [DIGEST_MAP_KEY]: {
-        [sanitizedKey]: { d: digest, v: version },
+        [sanitizedKey]: digestEntry,
       },
     };
 

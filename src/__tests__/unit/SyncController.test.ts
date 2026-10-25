@@ -1293,7 +1293,10 @@ describe('SyncEngine Tests', () => {
         anotherKey: 99,
       };
 
-      mockFirestore.fetch.mockImplementation(async (key: Extract<keyof TestStorage, string>) => remoteByKey[String(key)]);
+      mockFirestore.fetch.mockImplementation(
+        async (key: Extract<keyof TestStorage, string>, _options?: { kindHint?: 'array' | 'object' }) =>
+          remoteByKey[String(key)] as TestStorage[Extract<keyof TestStorage, string>]
+      );
       mockMetadataManager.getRemoteMetaForKey.mockImplementation((key: string) => ({
         d: 'remote-ignored',
         v: key === 'testKey' ? 111 : 222,

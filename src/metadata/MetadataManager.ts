@@ -10,6 +10,7 @@ import MetadataCoordinator from "./remote/MetadataCoordinator";
 import Log from "../utils/Log";
 import KeyRouter from "../routing/KeyRouter";
 import SessionToken from "../sync/SessionToken";
+import { RemoteDigestEntry } from "../models/sync/RemoteDigestEntry";
 
 export default class MetadataManager<T extends BaseStorageMapping> {
   constructor(
@@ -22,7 +23,7 @@ export default class MetadataManager<T extends BaseStorageMapping> {
   }
 
   private keyRouter: KeyRouter<T>;
-  private lastRemoteSnapshot: Record<string, { d: string; v: number }> = {};
+  private lastRemoteSnapshot: Record<string, RemoteDigestEntry> = {};
 
   get(key: Extract<keyof T, string>): LocalSyncMetadata | undefined {
     return this.metadataStore.get(key);
@@ -124,7 +125,7 @@ export default class MetadataManager<T extends BaseStorageMapping> {
   }
 
   /** Remote metadata from the most recent hydrateMetadata() pass — no additional fetch. */
-  getRemoteMetaForKey(key: Extract<keyof T, string>): { d: string; v: number } | undefined {
+  getRemoteMetaForKey(key: Extract<keyof T, string>): RemoteDigestEntry | undefined {
     return this.lastRemoteSnapshot[String(key)];
   }
 
@@ -214,7 +215,8 @@ export default class MetadataManager<T extends BaseStorageMapping> {
     if (remoteMeta) {
       return {
         digest: remoteMeta.d,
-        version: remoteMeta.v
+        version: remoteMeta.v,
+        k: remoteMeta.k,
       };
     }
 
