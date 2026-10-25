@@ -9,6 +9,7 @@ import MetadataCoordinatorRepo from "./MetadataCoordinatorRepo";
 import MetadataCoordinator from "./remote/MetadataCoordinator";
 import Log from "../utils/Log";
 import KeyRouter from "../routing/KeyRouter";
+import SessionToken from "../sync/SessionToken";
 
 export default class MetadataManager<T extends BaseStorageMapping> {
   constructor(
@@ -56,7 +57,25 @@ export default class MetadataManager<T extends BaseStorageMapping> {
     coordinator.updateSyncStatus(key, status);
   }
 
-  async hydrateMetadata(session: { isStale(): boolean }): Promise<void> {
+  private sessionProvider?: () => SessionToken;
+
+  setSessionProvider(provider: () => SessionToken): void {
+    this.sessionProvider = provider;
+    this.coordinatorRepo.setSessionProvider(provider);
+  }
+
+  getOperationSession(): SessionToken {
+    if (!this.sessionProvider) {
+      throw new Error('Ganon: session provider not configured on MetadataManager');
+    }
+    return this.sessionProvider();
+  }
+
+  clearLocalMetadataSync(): void {
+    this.metadataStore.clear();
+  }
+
+  async hydrateMetadata(session: { isStale(): boolean; isCurrentGeneration?(): boolean }): Promise<void> {
     Log.info('Ganon: MetadataManager.hydrateMetadata');
     if (!this.config?.cloudConfig) return;
 

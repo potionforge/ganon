@@ -25,6 +25,9 @@ import { REMOTE_METADATA_KEY } from '../../constants';
 import { SyncStatus } from '../../models/sync/SyncStatus';
 import { TestStorageMapping, MOCK_CLOUD_BACKUP_CONFIG } from '../../__mocks__/MockConfig';
 import { DIGEST_MAP_KEY } from '../../constants';
+import SessionToken from '../../sync/SessionToken';
+
+const fleetSession = SessionToken.forTests('user-1');
 
 const USER_DOC_PATH = 'users/user-1/backup/user';
 
@@ -55,8 +58,10 @@ function createMockCoordinatorHarness(
     }),
     setDocument: jest.fn().mockResolvedValue(undefined),
   };
+  const backupRef = { path: 'users/u1/backup' };
   const mockReferenceManager = {
-    getBackupRef: jest.fn().mockReturnValue({ path: 'users/u1/backup' }),
+    getBackupRef: jest.fn().mockReturnValue(backupRef),
+    getBackupRefForUser: jest.fn().mockReturnValue(backupRef),
     getDocumentRef: jest.fn().mockReturnValue({ id: 'user', path: USER_DOC_PATH }),
   };
   const metadataStore = new MetadataStore<TestStorageMapping>(storage);
@@ -65,11 +70,12 @@ function createMockCoordinatorHarness(
     mockReferenceManager as any,
     mockAdapter as any,
     metadataStore,
-    { isUserLoggedIn: () => true } as any,
+    { isUserLoggedIn: () => true, getCurrentUser: () => 'user-1' } as any,
     'user',
     resolved,
     scheduler
   );
+  coordinator.setSessionProvider(() => fleetSession);
 
   return { coordinator, metadataStore, mockAdapter };
 }
@@ -111,6 +117,7 @@ function createFakeFirestoreCoordinatorHarness(
     resolved,
     scheduler
   );
+  coordinator.setSessionProvider(() => fleetSession);
 
   const userDocRef = referenceManager.getDocumentRefForKey('count');
 

@@ -10,6 +10,13 @@ import { reconstructChunkedData } from './helpers/chunkReconstruction';
 import { generateChunks } from './helpers/chunkGeneration';
 import { BaseStorageMapping } from '../../models/storage/BaseStorageMapping';
 import { Scheduler, SystemScheduler } from '../../ports/Scheduler';
+import SessionToken from '../../sync/SessionToken';
+import { guardSessionBeforeIo, requireSessionInTransaction, StaleSessionAbort } from '../../sync/sessionGuard';
+
+export type ChunkWriteOptions = {
+  session: SessionToken;
+  transaction?: FirebaseFirestoreTypes.Transaction;
+};
 export interface ChunkedData {
   chunks: Array<[string, any]>;
   isChunked: boolean;
@@ -196,7 +203,7 @@ export default class ChunkManager<T extends BaseStorageMapping> {
     collectionRef: FirebaseFirestoreTypes.CollectionReference,
     key: string,
     value: any,
-    options?: { transaction?: FirebaseFirestoreTypes.Transaction }
+    options: ChunkWriteOptions
   ): Promise<void> {
     const operationStartTime = Date.now();
     Log.info(`ChunkManager: Starting write operation for key "${key}"`);
@@ -299,6 +306,10 @@ export default class ChunkManager<T extends BaseStorageMapping> {
         );
       }
 
+      if (error instanceof StaleSessionAbort) {
+        throw error;
+      }
+
       if (error instanceof SyncError) {
         throw error;
       }
@@ -321,7 +332,7 @@ export default class ChunkManager<T extends BaseStorageMapping> {
     collectionRef: FirebaseFirestoreTypes.CollectionReference,
     value: any,
     key: string,
-    options?: { transaction?: FirebaseFirestoreTypes.Transaction }
+    options: ChunkWriteOptions
   ): Promise<void> {
     const startTime = Date.now();
     Log.info(`ChunkManager: Starting single document merge for key "${key}"`);
@@ -341,17 +352,20 @@ export default class ChunkManager<T extends BaseStorageMapping> {
     }
 
     const writeStartTime = Date.now();
+    const session = options.session;
     if (chunkDocs.length > 1) {
       // Multiple chunks exist, need to clean up others and replace chunk_0 entirely
-      if (options?.transaction) {
+      if (options.transaction) {
         // Delete all chunks except chunk_0
-        chunkDocs.slice(1).forEach(doc => {
+        for (const doc of chunkDocs.slice(1)) {
+          requireSessionInTransaction(session, `ChunkManager.deleteDocumentWithTransaction.${doc.id}`);
           Log.info(`ChunkManager: Deleting extra chunk ${doc.id} for key "${key}"`);
-          this.adapter.deleteDocumentWithTransaction(options.transaction!, doc.ref);
-        });
+          this.adapter.deleteDocumentWithTransaction(options.transaction, doc.ref);
+        }
 
         // Replace chunk_0 entirely (not merge) to avoid leftover fields
         const chunk0Ref = collectionRef.doc('chunk_0');
+        requireSessionInTransaction(session, 'ChunkManager.setDocumentWithTransaction.chunk0');
         Log.info(`ChunkManager: Replacing chunk_0 with ${Object.keys(toWrite).length} fields for key "${key}"`);
         this.adapter.setDocumentWithTransaction(options.transaction, chunk0Ref, toWrite); // Use set, not merge, to replace entirely
       } else {
@@ -368,6 +382,9 @@ export default class ChunkManager<T extends BaseStorageMapping> {
         Log.info(`ChunkManager: Replacing chunk_0 with ${Object.keys(toWrite).length} fields for key "${key}"`);
         batch.set(chunk0Ref, toWrite); // Use set, not merge, to replace entirely
 
+        if (!guardSessionBeforeIo(session, 'ChunkManager.batch.commit.multi')) {
+          return;
+        }
         await batch.commit();
       }
       Log.info(`ChunkManager: Cleaned up ${chunkDocs.length - 1} extra chunks and replaced chunk_0 for key "${key}"`);
@@ -384,16 +401,24 @@ export default class ChunkManager<T extends BaseStorageMapping> {
       if (Array.isArray(value) || hasDeletedFields) {
         const operation = Array.isArray(value) ? 'array data' : 'deleted fields';
         Log.info(`ChunkManager: Replacing chunk_0 for ${operation} (${Object.keys(toWrite).length} items) for key "${key}"`);
-        if (options?.transaction) {
+        if (options.transaction) {
+          requireSessionInTransaction(session, 'ChunkManager.setDocumentWithTransaction.replace');
           await this.adapter.setDocumentWithTransaction(options.transaction, docRef, toWrite); // Replace to avoid orphaned fields
         } else {
+          if (!guardSessionBeforeIo(session, 'ChunkManager.setDocument.replace')) {
+            return;
+          }
           await this.adapter.setDocument(docRef, toWrite); // Replace to avoid orphaned fields
         }
       } else {
         Log.info(`ChunkManager: Merging ${Object.keys(toWrite).length} fields into existing chunk_0 for key "${key}"`);
-        if (options?.transaction) {
+        if (options.transaction) {
+          requireSessionInTransaction(session, 'ChunkManager.setDocumentWithTransaction.merge');
           await this.adapter.setDocumentWithTransaction(options.transaction, docRef, toWrite, { merge: true });
         } else {
+          if (!guardSessionBeforeIo(session, 'ChunkManager.setDocument.merge')) {
+            return;
+          }
           await this.adapter.setDocument(docRef, toWrite, { merge: true });
         }
       }
@@ -401,9 +426,13 @@ export default class ChunkManager<T extends BaseStorageMapping> {
       // No chunks exist, create chunk_0
       const docRef = collectionRef.doc('chunk_0');
       Log.info(`ChunkManager: Creating new chunk_0 with ${Object.keys(toWrite).length} fields for key "${key}"`);
-      if (options?.transaction) {
+      if (options.transaction) {
+        requireSessionInTransaction(session, 'ChunkManager.setDocumentWithTransaction.create');
         await this.adapter.setDocumentWithTransaction(options.transaction, docRef, toWrite);
       } else {
+        if (!guardSessionBeforeIo(session, 'ChunkManager.setDocument.create')) {
+          return;
+        }
         await this.adapter.setDocument(docRef, toWrite);
       }
     }
@@ -423,10 +452,11 @@ export default class ChunkManager<T extends BaseStorageMapping> {
     collectionRef: FirebaseFirestoreTypes.CollectionReference,
     value: any,
     key: string,
-    options?: { transaction?: FirebaseFirestoreTypes.Transaction }
+    options: ChunkWriteOptions
   ): Promise<void> {
     const startTime = Date.now();
     Log.info(`ChunkManager: Starting chunked diff operation for key "${key}"`);
+    const session = options.session;
 
     const metrics = {
       updatedChunks: 0,
@@ -469,7 +499,7 @@ export default class ChunkManager<T extends BaseStorageMapping> {
 
       // Process chunks in batches
       const writeStartTime = Date.now();
-      if (options?.transaction) {
+      if (options.transaction) {
         const transaction = options.transaction; // Store transaction in a variable to satisfy TypeScript
         // Process all chunks in a single transaction
         for (let i = 0; i < newChunks.length; i++) {
@@ -483,6 +513,7 @@ export default class ChunkManager<T extends BaseStorageMapping> {
           if (!existingData || !this.areChunksEqual(existingData, chunkData)) {
             const docRef = collectionRef.doc(chunkId);
             Log.info(`ChunkManager: Updating chunk ${chunkId} (${fieldCount} fields) for key "${key}"`);
+            requireSessionInTransaction(session, `ChunkManager.setDocumentWithTransaction.${chunkId}`);
             await this.adapter.setDocumentWithTransaction(transaction, docRef, chunkData);
             metrics.updatedChunks++;
           } else {
@@ -500,12 +531,13 @@ export default class ChunkManager<T extends BaseStorageMapping> {
 
         // Delete obsolete chunks
         if (existingChunks.size > 0) {
-          existingChunks.forEach((_, chunkId) => {
+          for (const chunkId of existingChunks.keys()) {
             const docRef = collectionRef.doc(chunkId);
             Log.info(`ChunkManager: Deleting obsolete chunk ${chunkId} for key "${key}"`);
+            requireSessionInTransaction(session, `ChunkManager.deleteDocumentWithTransaction.${chunkId}`);
             this.adapter.deleteDocumentWithTransaction(transaction, docRef);
             metrics.deletedChunks++;
-          });
+          }
         }
       } else {
         // Process chunks in batches without transaction
@@ -542,6 +574,9 @@ export default class ChunkManager<T extends BaseStorageMapping> {
           }
 
           if (batchHasChanges) {
+            if (!guardSessionBeforeIo(session, 'ChunkManager.batch.commit.chunkBatch')) {
+              return;
+            }
             await batch.commit();
 
             // Small delay between batches to prevent overwhelming Firestore
@@ -561,6 +596,9 @@ export default class ChunkManager<T extends BaseStorageMapping> {
             deleteBatch.delete(docRef);
             metrics.deletedChunks++;
           });
+          if (!guardSessionBeforeIo(session, 'ChunkManager.batch.commit.deleteObsoleteChunks')) {
+            return;
+          }
           await deleteBatch.commit();
           metrics.deleteDuration = Date.now() - deleteStartTime;
         }

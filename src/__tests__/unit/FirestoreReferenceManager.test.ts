@@ -28,7 +28,7 @@ describe('FirestoreReferenceManager', () => {
   it('throws the legacy error message for unknown keys', () => {
     const fake = new FakeFirestore();
     const manager = new FirestoreReferenceManager<TestMapping>(
-      { getCurrentUser: () => 'alice' },
+      { getCurrentUser: () => 'alice', isUserLoggedIn: () => true },
       cloudConfig,
       fake.module
     );

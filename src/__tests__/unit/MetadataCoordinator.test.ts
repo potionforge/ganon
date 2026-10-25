@@ -12,6 +12,7 @@ import IUserManager from '../../models/interfaces/IUserManager';
 import MetadataStore from '../../metadata/local/MetadataStore';
 import { resolveGanonConfig } from '../../models/config/resolveGanonConfig';
 import { FakeScheduler } from '../utils/FakeScheduler';
+import { testSession } from '../utils/testSession';
 
 // Mock dependencies
 jest.mock('../../firestore/ref/FirestoreReferenceManager');
@@ -69,6 +70,8 @@ describe('MetadataCoordinator Tests', () => {
     const metadataStore = mockLocalMetadata as unknown as MetadataStore<TestStorageMapping>;
     mockUserManager = new UserManager('email' as keyof TestStorageMapping, mockStorage) as jest.Mocked<UserManager<TestStorageMapping>>;
     mockUserManager.isUserLoggedIn.mockReturnValue(true);
+    mockUserManager.getCurrentUser.mockReturnValue('test-user');
+    mockUserManagerInterface.getCurrentUser.mockReturnValue('test-user');
 
     coordinator = new MetadataCoordinator(
       mockReferenceManager,
@@ -79,6 +82,7 @@ describe('MetadataCoordinator Tests', () => {
         resolveGanonConfig({ identifierKey: 'email', cloudConfig: MOCK_CLOUD_BACKUP_CONFIG, legacyMetadataWrites: true }),
       new FakeScheduler()
     );
+    coordinator.setSessionProvider(() => testSession);
   });
 
   afterEach(() => {

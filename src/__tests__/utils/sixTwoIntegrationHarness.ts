@@ -75,14 +75,15 @@ export type SixTwoHarness = {
 
 export function createSixTwoStack(
   config: InternalGanonConfig<SixTwoStorage>,
-  userId: string = SIX_TWO_USER
+  userId: string = SIX_TWO_USER,
+  operationsKvInput?: KeyValueStore
 ): SixTwoHarness {
   const fake = new FakeFirestore();
   const scheduler = new FakeScheduler();
   const clock = new FakeClock();
   clock.set(1_700_000_000_000);
   const storageKv = new MMKVFaker();
-  const operationsKv = new MMKVFaker();
+  const operationsKv = operationsKvInput ?? new MMKVFaker();
   const storage = new StorageManager<SixTwoStorage>(storageKv);
   const resolved = resolveGanonConfig(config);
   const userManager = new UserManager<SixTwoStorage>('email', storage);
@@ -125,6 +126,8 @@ export function createSixTwoStack(
       storage,
       firestore: firestoreManager,
       metadataManager,
+      getCurrentUserId: () => userManager.getCurrentUser(),
+      getRunSession: () => null,
     },
     operationsKv as unknown as KeyValueStore
   );

@@ -15,9 +15,9 @@ export interface ICloudManager<T extends BaseStorageMapping> {
   backup(
     key: Extract<keyof T, string>,
     value: any,
-    options: { digest: string; version: number }
+    options: { digest: string; version: number; session: import('../../sync/SessionToken').default }
   ): Promise<void>;
   fetch(key: Extract<keyof T, string>): Promise<T[keyof T] | undefined>;
-  delete(key: Extract<keyof T, string>): Promise<void>;
+  delete(key: Extract<keyof T, string>, session: import('../../sync/SessionToken').default): Promise<void>;
   dangerouslyDelete(): Promise<void>;
 }

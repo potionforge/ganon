@@ -78,6 +78,8 @@ describe('SyncEngine Tests', () => {
       getRemoteMetaForKey: jest.fn().mockReturnValue(undefined),
       invalidateCache: jest.fn(),
       cancelPendingOperations: jest.fn(),
+      setSessionProvider: jest.fn(),
+      clearLocalMetadataSync: jest.fn(),
     } as any;
     mockMetadataManager.isNeverSynced = jest.fn((key: string) => {
       const meta = mockMetadataManager.get(key as keyof TestStorage);
@@ -88,6 +90,8 @@ describe('SyncEngine Tests', () => {
       addOperation: jest.fn(),
       processOperations: jest.fn(),
       clearAll: jest.fn(),
+      configureSession: jest.fn(),
+      getActiveProcessOperations: jest.fn().mockReturnValue(null),
     } as any;
 
     mockUserManager = {
@@ -1502,9 +1506,10 @@ describe('SyncEngine Tests', () => {
       // Verify lastBackup was synced to remote
       await Promise.resolve(); // Wait for async backup promise
       expect(mockFirestore.backupLastBackupToUserDocument).toHaveBeenCalledTimes(1);
-      expect(mockFirestore.backupLastBackupToUserDocument).toHaveBeenCalledWith(expect.any(Number), {
-        ownerAtSchedule: 'test@example.com',
-      });
+      expect(mockFirestore.backupLastBackupToUserDocument).toHaveBeenCalledWith(
+        expect.any(Number),
+        expect.objectContaining({ userId: 'test@example.com' })
+      );
     });
 
     it('should not update lastBackup when no keys are successfully synced', async () => {
@@ -1536,9 +1541,10 @@ describe('SyncEngine Tests', () => {
       // Verify lastBackup was synced to remote
       await Promise.resolve(); // Wait for async backup promise
       expect(mockFirestore.backupLastBackupToUserDocument).toHaveBeenCalledTimes(1);
-      expect(mockFirestore.backupLastBackupToUserDocument).toHaveBeenCalledWith(expect.any(Number), {
-        ownerAtSchedule: 'test@example.com',
-      });
+      expect(mockFirestore.backupLastBackupToUserDocument).toHaveBeenCalledWith(
+        expect.any(Number),
+        expect.objectContaining({ userId: 'test@example.com' })
+      );
     });
 
     it('should not update lastBackup when syncAll has no successful backups', async () => {
@@ -1605,9 +1611,10 @@ describe('SyncEngine Tests', () => {
 
       // Verify the same timestamp was sent to remote, with schedule-time owner
       await Promise.resolve(); // Wait for async backup promise
-      expect(mockFirestore.backupLastBackupToUserDocument).toHaveBeenCalledWith(localTimestamp, {
-        ownerAtSchedule: 'test@example.com',
-      });
+      expect(mockFirestore.backupLastBackupToUserDocument).toHaveBeenCalledWith(
+        localTimestamp,
+        expect.objectContaining({ userId: 'test@example.com' })
+      );
     });
 
     it('should not sync lastBackup to remote when user is not logged in', async () => {

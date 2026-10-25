@@ -1,6 +1,7 @@
 import DeleteOperation from '../../sync/operations/DeleteOperation';
 import StorageManager from '../../managers/StorageManager';
 import FirestoreManager from '../../firestore/FirestoreManager';
+import { testSession } from '../utils/testSession';
 import { SyncStatus } from '../../models/sync/SyncStatus';
 import MetadataManager from '../../metadata/MetadataManager';
 import { CloudBackupConfig } from '../../models/config/CloudBackupConfig';
@@ -71,7 +72,8 @@ describe('DeleteOperation Sync Status Tests', () => {
       'key1',
       mockStorage,
       mockFirestore,
-      mockMetadataManager
+      mockMetadataManager,
+      testSession
     );
   });
 
@@ -196,6 +198,7 @@ describe('DeleteOperation Sync Status Tests', () => {
         mockStorage,
         mockFirestore,
         mockMetadataManager,
+        testSession
       );
       expect(operation).toBeDefined();
     });
@@ -205,7 +208,8 @@ describe('DeleteOperation Sync Status Tests', () => {
         'key1',
         mockStorage,
         mockFirestore,
-        mockMetadataManager
+        mockMetadataManager,
+        testSession
       );
       expect(operation).toBeDefined();
     });

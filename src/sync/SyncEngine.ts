@@ -29,7 +29,10 @@ import type { RemoteDataProbeResult } from "../models/sync/RemoteDataProbeResult
 import { Clock, SystemClock } from "../ports/Clock";
 import { CancelHandle, Scheduler, SystemScheduler } from "../ports/Scheduler";
 import KeyRouter from "../routing/KeyRouter";
-import HydrationSession from "./HydrationSession";
+import SessionToken from "./SessionToken";
+
+/** Max wait for in-flight processOperations during logout; correctness is session-fenced I/O, not this drain. */
+export const PROCESS_OPERATIONS_FENCE_MS = 1_000;
 
 /** Debounce delay for batched markAsPending → metadata flush scheduling. */
 export const MARK_AS_PENDING_DEBOUNCE_MS = 50;
@@ -71,8 +74,10 @@ export default class SyncEngine<T extends BaseStorageMapping> implements ISyncEn
   private resolvedConfig: ResolvedGanonConfig<T>;
   /** True after start() arms the engine; cleared by stop(). Idempotent start while running. */
   private running = false;
-  /** Bumped on stop() to invalidate in-flight hydrate passes across identity boundaries. */
+  /** In-memory generation; never persisted. Bumped on stop / logout bump / mint. */
   private hydrationGeneration = 0;
+  private _currentMintUserId: string | null = null;
+  private _lastMintedGeneration = -1;
 
   constructor(
     private storage: StorageManager<T>,
@@ -88,6 +93,66 @@ export default class SyncEngine<T extends BaseStorageMapping> implements ISyncEn
     this.resolvedConfig = resolveGanonConfig(config);
     this.keyRouter = keyRouter ?? new KeyRouter(config.cloudConfig);
     Log.verbose('Ganon: SyncEngine.constructor');
+    this.operationRepo.configureSession({
+      getCurrentUserId: () => this.userManager.getCurrentUser(),
+      getRunSession: () => this.captureSessionForOperation(),
+    });
+    this.metadataManager.setSessionProvider(() => this.captureSessionForOperation());
+  }
+
+  mintSession(userId: string): void {
+    this.hydrationGeneration += 1;
+    this._currentMintUserId = userId;
+    this._lastMintedGeneration = this.hydrationGeneration;
+  }
+
+  bumpSessionLoggedOut(): void {
+    this.hydrationGeneration += 1;
+    this._currentMintUserId = null;
+    this._lastMintedGeneration = -1;
+  }
+
+  captureSessionForOperation(): SessionToken {
+    const userId = this._currentMintUserId ?? this.userManager.getCurrentUser() ?? null;
+    return this._newSessionToken(this.hydrationGeneration, userId);
+  }
+
+  cancelMarkDebounceSync(): void {
+    if (this._markDebounceHandle) {
+      this._markDebounceHandle.cancel();
+      this._markDebounceHandle = null;
+    }
+    this._pendingMarkKeys.clear();
+  }
+
+  /** Synchronous RAM/queue teardown companion to Ganon.clearAllData() (after session bump). */
+  clearAllDataCompanionSync(): void {
+    this.metadataManager.clearLocalMetadataSync();
+    this.metadataManager.cancelPendingOperations();
+    this.operationRepo.clearAll();
+    this.cancelMarkDebounceSync();
+  }
+
+  private _newSessionToken(generation: number, userId: string | null): SessionToken {
+    return new SessionToken(
+      generation,
+      userId,
+      () => this.hydrationGeneration,
+      this.userManager
+    );
+  }
+
+  private _ensureStartMint(): void {
+    if (!this.userManager.isUserLoggedIn()) {
+      return;
+    }
+    const userId = this.userManager.getCurrentUser()!;
+    if (
+      this._lastMintedGeneration !== this.hydrationGeneration ||
+      this._currentMintUserId !== userId
+    ) {
+      this.mintSession(userId);
+    }
   }
 
   /**
@@ -107,6 +172,7 @@ export default class SyncEngine<T extends BaseStorageMapping> implements ISyncEn
       return;
     }
     this.running = true;
+    this._ensureStartMint();
 
     if (this.resolvedConfig.autoStartSync) {
       this.startSyncInterval();
@@ -134,6 +200,8 @@ export default class SyncEngine<T extends BaseStorageMapping> implements ISyncEn
     Log.verbose('Ganon: SyncEngine.stop');
     this.running = false;
     this.hydrationGeneration += 1;
+    this._currentMintUserId = null;
+    this._lastMintedGeneration = -1;
     // Release the dedupe handle so a later start()/hydrate() runs a fresh pass instead of
     // awaiting the now generation-dead in-flight promise. The orphaned pass still completes
     // internally but its generation guard prevents any write or waiter settlement.
@@ -148,11 +216,10 @@ export default class SyncEngine<T extends BaseStorageMapping> implements ISyncEn
     this.stopSyncInterval();
   }
 
-  private _beginSession(): HydrationSession {
-    return new HydrationSession(
+  private _beginSession(): SessionToken {
+    return this._newSessionToken(
       this.hydrationGeneration,
-      () => this.hydrationGeneration,
-      this.userManager
+      this.userManager.getCurrentUser() ?? null
     );
   }
 
@@ -168,7 +235,7 @@ export default class SyncEngine<T extends BaseStorageMapping> implements ISyncEn
    * Assigns {@link hydrationPromise} before any await so concurrent callers dedupe.
    */
   private _beginHydrationPass(
-    session: HydrationSession,
+    session: SessionToken,
     processKeys: () => Promise<RestoreResult>,
     errorLogMessage: string,
     completionLogMessage: string
@@ -404,7 +471,13 @@ export default class SyncEngine<T extends BaseStorageMapping> implements ISyncEn
       
       this.operationRepo.addOperation(
         key,
-        new SetOperation(key, this.storage, this.firestore, this.metadataManager)
+        new SetOperation(
+          key,
+          this.storage,
+          this.firestore,
+          this.metadataManager,
+          this.captureSessionForOperation()
+        )
       );
     } else {
       Log.info(`Ganon: skipping operation for ${key} - no changes detected (hash: ${currentHash})`);
@@ -436,7 +509,13 @@ export default class SyncEngine<T extends BaseStorageMapping> implements ISyncEn
 
     this.operationRepo.addOperation(
       key,
-      new DeleteOperation(key, this.storage, this.firestore, this.metadataManager)
+      new DeleteOperation(
+        key,
+        this.storage,
+        this.firestore,
+        this.metadataManager,
+        this.captureSessionForOperation()
+      )
     );
   }
 
@@ -1075,6 +1154,15 @@ export default class SyncEngine<T extends BaseStorageMapping> implements ISyncEn
       this._pendingLastBackupSync = null;
     }
 
+    const inFlight = this.operationRepo.getActiveProcessOperations();
+    if (inFlight) {
+      // Correctness comes from session-fenced I/O, not this wait — only helps fast ops finish cleanly.
+      await Promise.race([
+        inFlight,
+        new Promise<void>((resolve) => setTimeout(resolve, PROCESS_OPERATIONS_FENCE_MS)),
+      ]);
+    }
+
     // Cancel pending metadata sync operations
     this.metadataManager.cancelPendingOperations();
 
@@ -1107,10 +1195,10 @@ export default class SyncEngine<T extends BaseStorageMapping> implements ISyncEn
 
     // Capture identity at schedule time — the write may run after awaits, so the
     // FirestoreManager guard must compare against this, not a capture at call entry.
-    const ownerAtSchedule = this.userManager.getCurrentUser();
+    const sessionAtSchedule = this.captureSessionForOperation();
 
     const write = this.firestore
-      .backupLastBackupToUserDocument(timestamp, { ownerAtSchedule })
+      .backupLastBackupToUserDocument(timestamp, sessionAtSchedule)
       .catch((error) => {
         Log.error(`Ganon: Failed to sync lastBackup to remote: ${error}`);
         // Don't throw - we don't want lastBackup sync failures to break the main sync flow
@@ -1270,7 +1358,7 @@ export default class SyncEngine<T extends BaseStorageMapping> implements ISyncEn
     remoteHash: string,
     attempts: number,
     integrityConfig: Partial<IntegrityFailureConfig> | undefined,
-    session: HydrationSession
+    session: SessionToken
   ): Promise<{ success: boolean; recoveryStrategy?: string }> {
     if (session.isStale()) {
       return { success: false, recoveryStrategy: STALE_HYDRATION_RECOVERY_STRATEGY };
@@ -1440,7 +1528,7 @@ export default class SyncEngine<T extends BaseStorageMapping> implements ISyncEn
    */
   private async _forceMetadataRefresh(
     key: Extract<keyof T, string>,
-    session: HydrationSession
+    session: SessionToken
   ): Promise<{ success: boolean; recoveryStrategy: string }> {
     try {
       if (session.isStale()) {
@@ -1488,7 +1576,7 @@ export default class SyncEngine<T extends BaseStorageMapping> implements ISyncEn
    */
   private async _useLocalData(
     key: Extract<keyof T, string>,
-    session: HydrationSession
+    session: SessionToken
   ): Promise<{ success: boolean; recoveryStrategy: string }> {
     try {
       if (session.isStale()) {
@@ -1544,7 +1632,7 @@ export default class SyncEngine<T extends BaseStorageMapping> implements ISyncEn
    */
   private async _useRemoteDataDespiteIntegrityFailure(
     key: Extract<keyof T, string>,
-    session: HydrationSession
+    session: SessionToken
   ): Promise<{ success: boolean; recoveryStrategy: string }> {
     try {
       if (session.isStale()) {

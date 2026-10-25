@@ -8,6 +8,7 @@ import NetworkMonitor from '../../utils/NetworkMonitor';
 import { GanonConfig } from '../../models/config/GanonConfig';
 import { SyncStatus } from '../../models/sync/SyncStatus';
 import computeHash from '../../utils/computeHash';
+import { operationRepoSessionDeps, TEST_USER_ID } from '../utils/testSession';
 import { FakeScheduler } from '../utils/FakeScheduler';
 import {
   createMockFirestoreManager,
@@ -70,6 +71,7 @@ describe('SyncEngine.syncAll pending-mark flush', () => {
     const firestore = createMockFirestoreManager<TestStorage>();
     const userManager = createMockUserManager<TestStorage>();
     userManager.isUserLoggedIn.mockReturnValue(true);
+    userManager.getCurrentUser.mockReturnValue(TEST_USER_ID);
 
     const editedValue = 'edited-before-logout';
     storage.contains.mockReturnValue(true);
@@ -88,6 +90,7 @@ describe('SyncEngine.syncAll pending-mark flush', () => {
       storage,
       firestore,
       metadataManager,
+      ...operationRepoSessionDeps(),
     });
 
     const engine = createEngine(scheduler, {
@@ -97,6 +100,7 @@ describe('SyncEngine.syncAll pending-mark flush', () => {
       operationRepo,
       userManager,
     });
+    engine.mintSession(TEST_USER_ID);
 
     const result = await engine.syncAll();
 
@@ -104,7 +108,8 @@ describe('SyncEngine.syncAll pending-mark flush', () => {
       'key1',
       editedValue,
       computeHash(editedValue),
-      expect.any(Number)
+      expect.any(Number),
+      expect.any(Object)
     );
     expect(result.backedUpKeys).toContain('key1');
     expect(result.success).toBe(true);
@@ -117,6 +122,7 @@ describe('SyncEngine.syncAll pending-mark flush', () => {
     const firestore = createMockFirestoreManager<TestStorage>();
     const userManager = createMockUserManager<TestStorage>();
     userManager.isUserLoggedIn.mockReturnValue(true);
+    userManager.getCurrentUser.mockReturnValue(TEST_USER_ID);
 
     const editedValue = 'just-edited';
     storage.contains.mockReturnValue(true);
@@ -134,6 +140,7 @@ describe('SyncEngine.syncAll pending-mark flush', () => {
       storage,
       firestore,
       metadataManager,
+      ...operationRepoSessionDeps(),
     });
 
     const engine = createEngine(scheduler, {
@@ -144,6 +151,7 @@ describe('SyncEngine.syncAll pending-mark flush', () => {
       userManager,
     });
 
+    engine.mintSession(TEST_USER_ID);
     engine.markAsPending('key1');
     // Do not advance scheduler — debounce has not fired.
 
@@ -153,7 +161,8 @@ describe('SyncEngine.syncAll pending-mark flush', () => {
       'key1',
       editedValue,
       computeHash(editedValue),
-      expect.any(Number)
+      expect.any(Number),
+      expect.any(Object)
     );
     expect(result.backedUpKeys).toContain('key1');
   });

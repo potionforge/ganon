@@ -12,6 +12,7 @@ import SetOperation from '../../sync/operations/SetOperation';
 import DeleteOperation from '../../sync/operations/DeleteOperation';
 import { MMKVFaker } from '../../utils/MMKVFaker';
 import Log from '../../utils/Log';
+import { operationRepoSessionDeps, testSession, TEST_USER_ID } from '../utils/testSession';
 
 // Mock NetworkMonitor
 jest.mock('../../utils/NetworkMonitor');
@@ -85,6 +86,7 @@ const mockDeps = {
     get: jest.fn(),
     remove: jest.fn(),
   } as unknown as MetadataManager<TestStorageMapping>,
+  ...operationRepoSessionDeps(),
 };
 
 describe('OperationRepo', () => {
@@ -257,7 +259,7 @@ describe('OperationRepo', () => {
     });
 
     it('should remove synced operations from storage so they are not re-synced on reload', async () => {
-      const setOp = new SetOperation('testKey1', mockDeps.storage, mockDeps.firestore, mockDeps.metadataManager);
+      const setOp = new SetOperation('testKey1', mockDeps.storage, mockDeps.firestore, mockDeps.metadataManager, testSession);
       operationRepo.addOperation('testKey1', setOp);
 
       expect(mockStorage.getString('ganon_pending_operations')).toBeDefined();
@@ -276,8 +278,8 @@ describe('OperationRepo', () => {
 
   describe('storage persistence', () => {
     it('should save operations to storage when added', () => {
-      const setOp1 = new SetOperation('testKey1', mockDeps.storage, mockDeps.firestore, mockDeps.metadataManager);
-      const setOp2 = new SetOperation('testKey2', mockDeps.storage, mockDeps.firestore, mockDeps.metadataManager);
+      const setOp1 = new SetOperation('testKey1', mockDeps.storage, mockDeps.firestore, mockDeps.metadataManager, testSession);
+      const setOp2 = new SetOperation('testKey2', mockDeps.storage, mockDeps.firestore, mockDeps.metadataManager, testSession);
       operationRepo.addOperation('testKey1', setOp1);
       operationRepo.addOperation('testKey2', setOp2);
 
@@ -291,20 +293,22 @@ describe('OperationRepo', () => {
           type: 'set',
           key: 'testKey1',
           retryCount: 0,
-          maxRetries: 3
+          maxRetries: 3,
+          userId: TEST_USER_ID
         }),
         expect.objectContaining({
           type: 'set',
           key: 'testKey2',
           retryCount: 0,
-          maxRetries: 3
+          maxRetries: 3,
+          userId: TEST_USER_ID
         })
       ]));
     });
 
     it('should remove operations from storage when removed', () => {
-      const setOp1 = new SetOperation('testKey1', mockDeps.storage, mockDeps.firestore, mockDeps.metadataManager);
-      const setOp2 = new SetOperation('testKey2', mockDeps.storage, mockDeps.firestore, mockDeps.metadataManager);
+      const setOp1 = new SetOperation('testKey1', mockDeps.storage, mockDeps.firestore, mockDeps.metadataManager, testSession);
+      const setOp2 = new SetOperation('testKey2', mockDeps.storage, mockDeps.firestore, mockDeps.metadataManager, testSession);
       operationRepo.addOperation('testKey1', setOp1);
       operationRepo.addOperation('testKey2', setOp2);
       operationRepo.removeOperation('testKey1');
@@ -338,13 +342,15 @@ describe('OperationRepo', () => {
           type: 'set',
           key: 'testKey1',
           retryCount: 0,
-          maxRetries: 3
+          maxRetries: 3,
+          userId: TEST_USER_ID
         },
         {
           type: 'set',
           key: 'testKey2',
           retryCount: 0,
-          maxRetries: 3
+          maxRetries: 3,
+          userId: TEST_USER_ID
         }
       ]));
 
@@ -373,13 +379,15 @@ describe('OperationRepo', () => {
           type: 'set',
           key: 'testKey1',
           retryCount: 2,
-          maxRetries: 3
+          maxRetries: 3,
+          userId: TEST_USER_ID
         },
         {
           type: 'delete',
           key: 'testKey2',
           retryCount: 1,
-          maxRetries: 3
+          maxRetries: 3,
+          userId: TEST_USER_ID
         }
       ]));
 
@@ -414,13 +422,15 @@ describe('OperationRepo', () => {
           type: 'set',
           key: 'testKey1',
           retryCount: 3,
-          maxRetries: 3
+          maxRetries: 3,
+          userId: TEST_USER_ID
         },
         {
           type: 'delete',
           key: 'testKey2',
           retryCount: 3,
-          maxRetries: 3
+          maxRetries: 3,
+          userId: TEST_USER_ID
         }
       ]));
 
@@ -510,7 +520,8 @@ describe('OperationRepo', () => {
           type: 'set',
           key: 'testKey1',
           retryCount: 1,
-          maxRetries: 3
+          maxRetries: 3,
+          userId: TEST_USER_ID
         }
       ]));
 
@@ -557,19 +568,22 @@ describe('OperationRepo', () => {
           type: 'set',
           key: 'testKey1',
           retryCount: 0,
-          maxRetries: 3
+          maxRetries: 3,
+          userId: TEST_USER_ID
         },
         {
           type: 'delete',
           key: 'testKey2',
           retryCount: 0,
-          maxRetries: 3
+          maxRetries: 3,
+          userId: TEST_USER_ID
         },
         {
           type: 'set',
           key: 'testKey3',
           retryCount: 1,
-          maxRetries: 3
+          maxRetries: 3,
+          userId: TEST_USER_ID
         }
       ]));
 
@@ -610,7 +624,7 @@ describe('OperationRepo', () => {
       jest.spyOn(mockStorage, 'set').mockImplementationOnce(() => {
         throw new Error('Storage error');
       });
-      const setOp1 = new SetOperation('testKey1', mockDeps.storage, mockDeps.firestore, mockDeps.metadataManager);
+      const setOp1 = new SetOperation('testKey1', mockDeps.storage, mockDeps.firestore, mockDeps.metadataManager, testSession);
       // Should not throw when adding operation
       expect(() => {
         operationRepo.addOperation('testKey1', setOp1);
@@ -639,7 +653,7 @@ describe('OperationRepo', () => {
 
   describe('operation serialization', () => {
     it('should serialize and deserialize SetOperation', () => {
-      const setOp = new SetOperation('testKey1', mockDeps.storage, mockDeps.firestore, mockDeps.metadataManager);
+      const setOp = new SetOperation('testKey1', mockDeps.storage, mockDeps.firestore, mockDeps.metadataManager, testSession);
       setOp.incrementRetryCount(); // Set some state
 
       operationRepo.addOperation('testKey1', setOp);
@@ -651,6 +665,7 @@ describe('OperationRepo', () => {
       expect(operations[0]).toEqual({
         type: 'set',
         key: 'testKey1',
+        userId: TEST_USER_ID,
         retryCount: 1,
         maxRetries: 3,
       });
@@ -663,7 +678,7 @@ describe('OperationRepo', () => {
     });
 
     it('should serialize and deserialize DeleteOperation', () => {
-      const deleteOp = new DeleteOperation('testKey1', mockDeps.storage, mockDeps.firestore, mockDeps.metadataManager);
+      const deleteOp = new DeleteOperation('testKey1', mockDeps.storage, mockDeps.firestore, mockDeps.metadataManager, testSession);
       deleteOp.incrementRetryCount(); // Set some state
 
       operationRepo.addOperation('testKey1', deleteOp);
@@ -675,6 +690,7 @@ describe('OperationRepo', () => {
       expect(operations[0]).toEqual({
         type: 'delete',
         key: 'testKey1',
+        userId: TEST_USER_ID,
         retryCount: 1,
         maxRetries: 3,
       });
@@ -687,8 +703,8 @@ describe('OperationRepo', () => {
     });
 
     it('should handle mixed operation types', () => {
-      const setOp = new SetOperation('testKey1', mockDeps.storage, mockDeps.firestore, mockDeps.metadataManager);
-      const deleteOp = new DeleteOperation('testKey2', mockDeps.storage, mockDeps.firestore, mockDeps.metadataManager);
+      const setOp = new SetOperation('testKey1', mockDeps.storage, mockDeps.firestore, mockDeps.metadataManager, testSession);
+      const deleteOp = new DeleteOperation('testKey2', mockDeps.storage, mockDeps.firestore, mockDeps.metadataManager, testSession);
 
       operationRepo.addOperation('testKey1', setOp);
       operationRepo.addOperation('testKey2', deleteOp);
@@ -704,7 +720,7 @@ describe('OperationRepo', () => {
 
     it('should handle missing dependencies gracefully', () => {
       const repoWithoutDeps = new OperationRepo<TestStorageMapping>(mockNetworkMonitor, undefined, mockStorage);
-      const setOp = new SetOperation('testKey1', mockDeps.storage, mockDeps.firestore, mockDeps.metadataManager);
+      const setOp = new SetOperation('testKey1', mockDeps.storage, mockDeps.firestore, mockDeps.metadataManager, testSession);
       
       // Should not throw when adding operation without deps
       expect(() => {

@@ -8,6 +8,7 @@ import MetadataStore from "./local/MetadataStore";
 import UserManager from "../managers/UserManager";
 import { Scheduler } from "../ports/Scheduler";
 import { ResolvedGanonConfig } from "../models/config/resolveGanonConfig";
+import SessionToken from "../sync/SessionToken";
 
 export default class MetadataCoordinatorRepo<T extends BaseStorageMapping> {
   private coordinators: Record<string, MetadataCoordinator<T>> = {};
@@ -41,6 +42,10 @@ export default class MetadataCoordinatorRepo<T extends BaseStorageMapping> {
       );
       this.coordinators[documentKey] = coordinator;
     }
+  }
+
+  setSessionProvider(provider: () => SessionToken): void {
+    Object.values(this.coordinators).forEach((c) => c.setSessionProvider(provider));
   }
 
   getCoordinator(documentKey: Extract<keyof T, string>) {

@@ -30,22 +30,25 @@ const mockSyncEngine: any = {
   start: jest.fn(),
   stop: jest.fn(),
   stopSyncInterval: jest.fn(),
-  cancelPendingOperations: jest.fn().mockResolvedValue(undefined as void),
-  syncAll: jest.fn().mockResolvedValue({
+  cancelPendingOperations: jest.fn<any>().mockResolvedValue(undefined),
+  mintSession: jest.fn(),
+  bumpSessionLoggedOut: jest.fn(),
+  clearAllDataCompanionSync: jest.fn(),
+  syncAll: jest.fn<any>().mockResolvedValue({
     success: true,
     backedUpKeys: [],
     failedKeys: [],
     skippedKeys: [],
     timestamp: new Date(),
   }),
-  restore: jest.fn().mockResolvedValue({
+  restore: jest.fn<any>().mockResolvedValue({
     success: true,
     restoredKeys: ['settings'],
     failedKeys: [],
     integrityFailures: [],
     timestamp: new Date(),
   }),
-  hydrate: jest.fn().mockResolvedValue({
+  hydrate: jest.fn<any>().mockResolvedValue({
     success: true,
     restoredKeys: [],
     failedKeys: [],

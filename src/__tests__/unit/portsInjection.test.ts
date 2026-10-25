@@ -12,6 +12,8 @@ import { GanonConfig } from '../../models/config/GanonConfig';
 import FirestoreManager from '../../firestore/FirestoreManager';
 import MetadataManager from '../../metadata/MetadataManager';
 import SetOperation from '../../sync/operations/SetOperation';
+import { operationRepoSessionDeps, testSession } from '../utils/testSession';
+import SessionToken from '../../sync/SessionToken';
 import { FirebaseFirestoreTypes } from '@react-native-firebase/firestore';
 
 jest.mock('../../utils/Log', () => ({
@@ -98,6 +100,7 @@ describe('Port injection smoke tests', () => {
         get: jest.fn(),
         remove: jest.fn(),
       } as unknown as MetadataManager<TestStorageMapping>,
+      ...operationRepoSessionDeps(),
     };
 
     beforeEach(() => {
@@ -112,7 +115,8 @@ describe('Port injection smoke tests', () => {
         'testKey1',
         mockDeps.storage,
         mockDeps.firestore,
-        mockDeps.metadataManager
+        mockDeps.metadataManager,
+        testSession
       );
 
       const repo = new OperationRepo<TestStorageMapping>(mockNetworkMonitor, mockDeps, kv);
@@ -174,7 +178,9 @@ describe('Port injection smoke tests', () => {
         .spyOn(require('../../firestore/chunking/helpers/chunkGeneration'), 'generateChunks')
         .mockResolvedValue(chunks);
 
-      await chunkManager.writeData(mockCollectionRef, 'test-key', { field0: 'value0' });
+      await chunkManager.writeData(mockCollectionRef, 'test-key', { field0: 'value0' }, {
+        session: SessionToken.forTests('test-user'),
+      });
 
       expect(delaySpy).toHaveBeenCalledWith(BATCH_DELAY);
       expect(delaySpy).toHaveBeenCalledTimes(expectedDelayCalls);

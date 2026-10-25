@@ -11,6 +11,7 @@ import { ResolvedGanonConfig } from "../../models/config/resolveGanonConfig";
 import MetadataStore from "../local/MetadataStore";
 import RemoteMetadataCache from "./RemoteMetadataCache";
 import MetadataFlushQueue from "./MetadataFlushQueue";
+import SessionToken from "../../sync/SessionToken";
 
 /** Per-document metadata coordinator composing cache + flush queue + local store. */
 export default class MetadataCoordinator<T extends BaseStorageMapping> {
@@ -127,6 +128,10 @@ export default class MetadataCoordinator<T extends BaseStorageMapping> {
   cancelPendingOperations(): void {
     this.flushQueue.cancelAll();
     this.remoteCache.invalidate();
+  }
+
+  setSessionProvider(provider: () => SessionToken): void {
+    this.flushQueue.setSessionProvider(provider);
   }
 
   getCachedRemote(): MetadataStorage {

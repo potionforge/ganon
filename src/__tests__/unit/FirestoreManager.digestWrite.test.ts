@@ -8,6 +8,7 @@ import { MOCK_CLOUD_BACKUP_CONFIG, TestStorageMapping } from '../../__mocks__/Mo
 import { clearMockStore, getFirestore, getMockStore } from '@react-native-firebase/firestore';
 import { DIGEST_MAP_KEY } from '../../constants';
 import { FakeScheduler } from '../utils/FakeScheduler';
+import SessionToken from '../../sync/SessionToken';
 
 function createFirestoreManager(storage: StorageManager<TestStorageMapping>) {
   const userManager = new UserManager<TestStorageMapping>('email', storage);
@@ -44,7 +45,8 @@ describe('FirestoreManager digest writes', () => {
     storage.set('email', 'user-1');
     const { firestoreManager, referenceManager } = createFirestoreManager(storage);
 
-    await firestoreManager.syncValueWithDigest('count', 42, 'abc123', 99);
+    const session = SessionToken.forTests('user-1');
+    await firestoreManager.syncValueWithDigest('count', 42, 'abc123', 99, session);
 
     const docPath = referenceManager.getDocumentRefForKey('count').path;
     const raw = getMockStore().get(docPath);
@@ -62,7 +64,8 @@ describe('FirestoreManager digest writes', () => {
     storage.set('email', 'user-1');
     const { firestoreManager, referenceManager } = createFirestoreManager(storage);
 
-    await firestoreManager.syncValueWithDigest('settings', { theme: 'dark' }, 'sub-digest', 7);
+    const session = SessionToken.forTests('user-1');
+    await firestoreManager.syncValueWithDigest('settings', { theme: 'dark' }, 'sub-digest', 7, session);
 
     const parentDocPath = referenceManager.getDocumentRefForKey('settings').path;
     const raw = getMockStore().get(parentDocPath);

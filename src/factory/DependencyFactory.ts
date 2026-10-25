@@ -82,6 +82,8 @@ export default class DependencyFactory<T extends BaseStorageMapping> {
           storage: this.storageManager,
           firestore: this.firestoreManager,
           metadataManager: this.metadataManager,
+          getCurrentUserId: () => this.userManager.getCurrentUser(),
+          getRunSession: () => null,
         },
         operationsKv
       );

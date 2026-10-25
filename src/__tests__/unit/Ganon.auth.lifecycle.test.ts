@@ -32,10 +32,10 @@ const mockStorageManager: any = {
 };
 
 const mockFirestoreManager: any = {
-  fetch: jest.fn().mockResolvedValue(undefined),
-  backup: jest.fn().mockResolvedValue(undefined),
-  delete: jest.fn().mockResolvedValue(undefined),
-  backupLastBackupToUserDocument: jest.fn().mockResolvedValue(undefined),
+  fetch: jest.fn<any>().mockResolvedValue(undefined),
+  backup: jest.fn<any>().mockResolvedValue(undefined),
+  delete: jest.fn<any>().mockResolvedValue(undefined),
+  backupLastBackupToUserDocument: jest.fn<any>().mockResolvedValue(undefined),
   cloudConfig: {
     profile: { docKeys: ['key1'], subcollectionKeys: [] },
   },
@@ -43,25 +43,29 @@ const mockFirestoreManager: any = {
 
 const mockMetadataManager: any = {
   get: jest.fn(),
-  getRemoteMetadataOnly: jest.fn().mockResolvedValue(undefined),
-  probeRemoteTenure: jest.fn().mockResolvedValue({ present: false, errors: [] }),
-  needsHydration: jest.fn().mockResolvedValue(false),
-  recordLocalChange: jest.fn().mockResolvedValue(undefined),
-  persistLocalChange: jest.fn().mockResolvedValue(undefined),
-  recordSyncedState: jest.fn().mockResolvedValue(undefined),
-  hydrateMetadata: jest.fn().mockResolvedValue(undefined),
+  getRemoteMetadataOnly: jest.fn<any>().mockResolvedValue(undefined),
+  probeRemoteTenure: jest.fn<any>().mockResolvedValue({ present: false, errors: [] }),
+  needsHydration: jest.fn<any>().mockResolvedValue(false),
+  recordLocalChange: jest.fn<any>().mockResolvedValue(undefined),
+  persistLocalChange: jest.fn<any>().mockResolvedValue(undefined),
+  recordSyncedState: jest.fn<any>().mockResolvedValue(undefined),
+  hydrateMetadata: jest.fn<any>().mockResolvedValue(undefined),
   getRemoteMetaForKey: jest.fn(),
   invalidateCache: jest.fn(),
   invalidateAllRemoteCaches: jest.fn(),
   cancelPendingOperations: jest.fn(),
   isNeverSynced: jest.fn().mockReturnValue(false),
+  setSessionProvider: jest.fn(),
+  clearLocalMetadataSync: jest.fn(),
 };
 
 const mockOperationRepo: any = {
   addOperation: jest.fn(),
-  processOperations: jest.fn().mockResolvedValue([{ success: true, key: 'key1' }]),
+  processOperations: jest.fn<any>().mockResolvedValue([{ success: true, key: 'key1' }]),
   hasPendingOperations: jest.fn().mockReturnValue(false),
   clearAll: jest.fn(),
+  configureSession: jest.fn(),
+  getActiveProcessOperations: jest.fn().mockReturnValue(null),
 };
 
 const mockUserManager: any = {

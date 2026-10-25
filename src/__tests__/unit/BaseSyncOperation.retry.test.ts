@@ -5,6 +5,7 @@ import { MockMetadataManager } from '../../__mocks__/MockMetadataManager';
 import SyncOperationResult from '../../models/sync/SyncOperationResult';
 import SyncError, { SyncErrorType } from '../../errors/SyncError';
 import UserManager from '../../managers/UserManager';
+import { testSession } from '../utils/testSession';
 
 // Mock dependencies
 jest.mock('../../managers/StorageManager');
@@ -29,7 +30,7 @@ class TestSyncOperation extends BaseSyncOperation<TestStorage> {
     private shouldSucceed: boolean = true,
     private errorToThrow?: Error
   ) {
-    super(key, storage, firestore, metadataManager);
+    super(key, storage, firestore, metadataManager, testSession);
   }
 
   async execute(): Promise<SyncOperationResult<TestStorage>> {

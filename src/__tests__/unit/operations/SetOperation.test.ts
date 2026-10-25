@@ -8,6 +8,7 @@ import {
   createMockFirestoreManager, 
   createMockMetadataManagerInstance 
 } from '../../utils/TestSetupUtils';
+import { testSession } from '../../utils/testSession';
 
 // Mock Log (including verbose) to avoid noise in tests
 jest.mock('../../../utils/Log', () => ({
@@ -40,7 +41,8 @@ describe('SetOperation', () => {
       testKey,
       mockStorage,
       mockFirestore,
-      mockMetadataManager
+      mockMetadataManager,
+      testSession
     );
   });
 
@@ -68,7 +70,8 @@ describe('SetOperation', () => {
         testKey,
         testUser,
         expect.any(String),
-        expect.any(Number)
+        expect.any(Number),
+        testSession
       );
 
       // Verify metadata was updated
@@ -97,7 +100,8 @@ describe('SetOperation', () => {
         testKey,
         undefined,
         expect.any(String),
-        expect.any(Number)
+        expect.any(Number),
+        testSession
       );
 
       // Verify metadata was updated with empty digest for undefined
@@ -125,7 +129,8 @@ describe('SetOperation', () => {
         testKey,
         null,
         expect.any(String),
-        expect.any(Number)
+        expect.any(Number),
+        testSession
       );
 
       // Verify metadata was updated

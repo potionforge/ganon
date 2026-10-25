@@ -189,9 +189,14 @@ export class FakeFirestore {
       },
     } as FirebaseFirestoreTypes.Transaction;
 
-    const result = await updateFunction(tx);
-    pending.forEach(op => op());
-    return result;
+    try {
+      const result = await updateFunction(tx);
+      pending.forEach(op => op());
+      return result;
+    } catch (error) {
+      pending.length = 0;
+      throw error;
+    }
   }
 
   writeBatch(): FirebaseFirestoreTypes.WriteBatch {

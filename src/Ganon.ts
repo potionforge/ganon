@@ -487,6 +487,7 @@ export default class Ganon<T extends Record<string, any> & BaseStorageMapping> i
       this._loginCycleInProgress = true;
       // Set identifier locally to mark user as logged in
       this.storageManager.set(identifierKey, userId as unknown as T[Extract<keyof T, string>]);
+      this.syncEngine.mintSession(userId);
 
       // Indeterminate must NOT choose backup — that arm runs syncAll with writes.
       const probe = await this.syncEngine.probeRemoteData();

@@ -32,6 +32,40 @@ export default class FirestoreReferenceManager<T extends BaseStorageMapping> imp
    * @returns A reference to the backup collection for the current user
    * @throws {SyncError} If no user is logged in
    */
+  getBackupRefForUser(userId: string): FirebaseFirestoreTypes.CollectionReference {
+    const userRef = doc(this.firestore, 'users', userId);
+    return collection(userRef, 'backup');
+  }
+
+  getUserRefForUser(userId: string): FirebaseFirestoreTypes.DocumentReference {
+    return doc(this.firestore, 'users', userId);
+  }
+
+  getRefForKeyForUser(
+    key: Extract<keyof T, string>,
+    userId: string
+  ): GetRefForKeyResult {
+    const route = this.keyRouter.route(key);
+    if (!route) {
+      throw new Error(`Ganon: key ${key} not found in cloudConfig`);
+    }
+
+    const backupRef = this.getBackupRefForUser(userId);
+    const docRef = this.getDocumentRef(backupRef, route.document);
+
+    if (route.kind === 'docField') {
+      return {
+        ref: docRef,
+        type: DocumentOrCollection.Document,
+      };
+    }
+
+    return {
+      ref: this.getCollectionRef(docRef, key),
+      type: DocumentOrCollection.Collection,
+    };
+  }
+
   getBackupRef(): FirebaseFirestoreTypes.CollectionReference {
     const identifier = this.userManager.getCurrentUser();
     Log.verbose(`🔥 FirestoreReferenceManager.getBackupRef called with identifier: ${identifier}`);

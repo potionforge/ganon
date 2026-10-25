@@ -1,6 +1,7 @@
 import SetOperation from '../../sync/operations/SetOperation';
 import StorageManager from '../../managers/StorageManager';
 import FirestoreManager from '../../firestore/FirestoreManager';
+import { testSession } from '../utils/testSession';
 import { SyncStatus } from '../../models/sync/SyncStatus';
 import computeHash from '../../utils/computeHash';
 import MetadataManager from '../../metadata/MetadataManager';
@@ -179,7 +180,7 @@ describe('SetOperation Sync Status Tests', () => {
     });
 
     // Create operation instance
-    setOperation = new SetOperation('key1', storageManager, firestoreManager, metadataManager);
+    setOperation = new SetOperation('key1', storageManager, firestoreManager, metadataManager, testSession);
   });
 
   describe('sync status lifecycle', () => {
@@ -229,7 +230,7 @@ describe('SetOperation Sync Status Tests', () => {
 
     it('should use empty string as hash for undefined values', async () => {
       // Create operation with undefined value
-      const undefinedOperation = new SetOperation('key2', storageManager, firestoreManager, metadataManager);
+      const undefinedOperation = new SetOperation('key2', storageManager, firestoreManager, metadataManager, testSession);
 
       // Execute operation
       await undefinedOperation.execute();
