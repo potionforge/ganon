@@ -7,6 +7,7 @@ import { SyncStatus } from "../../models/sync/SyncStatus";
 import Log from "../../utils/Log";
 import MetadataManager from "../../metadata/MetadataManager";
 import SessionToken from "../SessionToken";
+import { nextVersion } from "../../utils/nextVersion";
 
 export default class DeleteOperation<T extends BaseStorageMapping> extends BaseSyncOperation<T> {
   constructor(
@@ -31,8 +32,11 @@ export default class DeleteOperation<T extends BaseStorageMapping> extends BaseS
       // Set status to InProgress when operation starts
       this.metadataManager.updateSyncStatus(this.key, SyncStatus.InProgress);
 
+      const localMetadata = this.metadataManager.get(this.key);
+      const tombstoneVersion = nextVersion(localMetadata?.version ?? 0);
+
       // Step 1: Delete from Firestore
-      await this.firestore.delete(this.key, this.session);
+      await this.firestore.delete(this.key, this.session, { version: tombstoneVersion });
 
       if (this.session.isStale()) {
         Log.info(`Ganon: aborted stale sync work (DeleteOperation.post-remote key=${String(this.key)})`);
@@ -43,7 +47,7 @@ export default class DeleteOperation<T extends BaseStorageMapping> extends BaseS
       this.storage.remove(this.key);
       await this.metadataManager.set(this.key, {
         syncStatus: SyncStatus.Synced,
-        version: Date.now(),
+        version: tombstoneVersion,
         digest: '',
       });
 

@@ -41,6 +41,18 @@ export default class FirestoreReferenceManager<T extends BaseStorageMapping> imp
     return doc(this.firestore, 'users', userId);
   }
 
+  getParentDocumentRefForKeyForUser(
+    key: Extract<keyof T, string>,
+    userId: string
+  ): FirebaseFirestoreTypes.DocumentReference {
+    const route = this.keyRouter.route(key);
+    if (!route) {
+      throw new Error(`Ganon: key ${key} not found in cloudConfig`);
+    }
+    const backupRef = this.getBackupRefForUser(userId);
+    return this.getDocumentRef(backupRef, route.document);
+  }
+
   getRefForKeyForUser(
     key: Extract<keyof T, string>,
     userId: string

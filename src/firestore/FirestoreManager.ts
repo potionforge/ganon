@@ -291,7 +291,7 @@ export default class FirestoreManager<T extends BaseStorageMapping> implements I
     // If value is undefined, treat it as a deletion
     if (value === undefined) {
       Log.info(`Ganon: value for key ${String(key)} is undefined, treating as deletion`);
-      await this.delete(key, session);
+      await this.delete(key, session, { version: options.version });
       return;
     }
 
@@ -427,6 +427,16 @@ export default class FirestoreManager<T extends BaseStorageMapping> implements I
    * @returns Promise that resolves with the fetched value, or undefined if not found
    * @throws {SyncError} Throws error if fetch fails
    */
+  invalidateSubcollectionReadCache(key: Extract<keyof T, string>, session: SessionToken): void {
+    const { ref, type } = this.referenceManager.getRefForKeyForUser(
+      key,
+      this._requireSessionUserId(session)
+    );
+    if (type === DocumentOrCollection.Collection) {
+      this.chunkManager.invalidateReadCache(ref as FirebaseFirestoreTypes.CollectionReference);
+    }
+  }
+
   async fetch(key: Extract<keyof T, string>): Promise<T[keyof T] | undefined> {
     Log.verbose(`Ganon: FirestoreManager.fetch, key: ${String(key)}`);
 
@@ -574,13 +584,19 @@ export default class FirestoreManager<T extends BaseStorageMapping> implements I
    * @returns Promise that resolves when the deletion is complete
    * @throws {SyncError} Throws error if delete fails
    */
-  async delete(key: Extract<keyof T, string>, session: SessionToken): Promise<void> {
+  async delete(
+    key: Extract<keyof T, string>,
+    session: SessionToken,
+    options: { version: number }
+  ): Promise<void> {
     Log.verbose(`Ganon: FirestoreManager.delete, key: ${String(key)}`);
 
     if (session.isStale()) {
       Log.info(`Ganon: aborted stale sync work (delete.start key=${String(key)})`);
       return;
     }
+
+    const { version } = options;
 
     let accessType: DocumentOrCollection | undefined;
     let accessPath: string | undefined;
@@ -592,45 +608,50 @@ export default class FirestoreManager<T extends BaseStorageMapping> implements I
       accessType = type;
       accessPath = ref.path;
 
+      const keyStr = String(key);
+      const sanitizedKey = this.dataProcessor.sanitizeFieldName(keyStr);
+      const tombstone = { d: '', v: version };
+      const digestTombstones: Record<string, { d: string; v: number }> = {
+        [sanitizedKey]: tombstone,
+      };
+      if (sanitizedKey !== keyStr) {
+        digestTombstones[keyStr] = tombstone;
+      }
+
       if (type === DocumentOrCollection.Document) {
         const docRef = ref as FirebaseFirestoreTypes.DocumentReference;
-        const docSnap = await this.adapter.getDocument(docRef);
+        const fieldDelete = this.adapter.fieldDelete();
+        const payload: Record<string, unknown> = {
+          [sanitizedKey]: fieldDelete,
+          [DIGEST_MAP_KEY]: digestTombstones,
+        };
+        if (sanitizedKey !== keyStr) {
+          payload[keyStr] = fieldDelete;
+        }
 
-        if (docSnap.exists) {
-          const data = docSnap.data();
-          if (data) {
-            const keyStr = String(key);
-            const sanitizedKey = this.dataProcessor.sanitizeFieldName(keyStr);
-
-            // Check both sanitized and original keys
-            const hasOriginalKey = data[keyStr] !== undefined;
-            const hasSanitizedKey = data[sanitizedKey] !== undefined;
-
-            if (hasOriginalKey || hasSanitizedKey) {
-              const updatedData = { ...data };
-
-              if (hasOriginalKey) {
-                delete updatedData[keyStr];
-              }
-
-              if (hasSanitizedKey && sanitizedKey !== keyStr) {
-                delete updatedData[sanitizedKey];
-              }
-
-              if (guardSessionBeforeIo(session, 'delete.setDocument')) {
-                await this.adapter.setDocument(docRef, updatedData);
-              }
-            }
-          }
+        if (guardSessionBeforeIo(session, 'delete.mergeFieldDelete')) {
+          await this.adapter.setDocument(docRef, payload, { merge: true });
         }
       } else {
         const collRef = ref as FirebaseFirestoreTypes.CollectionReference;
+        const parentDocRef =
+          collRef.parent ??
+          this.referenceManager.getParentDocumentRefForKeyForUser(
+            key,
+            this._requireSessionUserId(session)
+          );
         const snapshot = await this.adapter.getCollection(collRef);
         const batch = this.adapter.writeBatch();
         snapshot.docs.forEach(doc => batch.delete(doc.ref));
+        batch.set(
+          parentDocRef,
+          { [DIGEST_MAP_KEY]: digestTombstones },
+          { merge: true }
+        );
         if (guardSessionBeforeIo(session, 'delete.batch.commit')) {
           await batch.commit();
         }
+        this.chunkManager.invalidateReadCache(collRef);
       }
     } catch (error) {
       Log.error(`Ganon FirestoreManager: Delete failed for key ${String(key)}: ${error}`);

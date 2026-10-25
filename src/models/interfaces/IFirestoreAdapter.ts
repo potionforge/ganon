@@ -3,6 +3,9 @@ import {
 } from '@react-native-firebase/firestore';
 
 export default interface IFirestoreAdapter {
+  /** Sentinel for merge writes; only the adapter may translate this to Firestore FieldValue.delete(). */
+  fieldDelete(): unknown;
+
   getDocument(ref: FirebaseFirestoreTypes.DocumentReference): Promise<FirebaseFirestoreTypes.DocumentSnapshot>;
   setDocument(ref: FirebaseFirestoreTypes.DocumentReference, data: any, options?: FirebaseFirestoreTypes.SetOptions): Promise<void>;
   updateDocument(ref: FirebaseFirestoreTypes.DocumentReference, data: any): Promise<void>;

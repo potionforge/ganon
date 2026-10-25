@@ -1,5 +1,6 @@
 import { deepMerge } from '../../src/__tests__/utils/deepMerge';
 import { getFakeFromModule, getRefOwner } from '../../src/__tests__/utils/FakeFirestore';
+import { createFieldDeleteMarker } from '../../src/firestore/fieldDeleteMarker';
 
 /** Minimal Timestamp for DataProcessor restore paths in integration tests. */
 export class Timestamp {
@@ -204,8 +205,7 @@ const mockFirestore = {
     return batch;
   },
   query: () => ({}),
-  // Unsupported: Ganon does not use deleteField() with merge writes. Real sentinel would delete the key.
-  deleteField: () => ({}),
+  deleteField: () => createFieldDeleteMarker(),
   runTransaction: async <T>(
     firestore: unknown,
     updateFunction: (transaction: {

@@ -97,7 +97,8 @@ export class MockCloudManager<T extends BaseStorageMapping> implements ICloudMan
 
   async delete(
     key: Extract<keyof T, string>,
-    _session: import('../sync/SessionToken').default
+    _session: import('../sync/SessionToken').default,
+    options: { version: number }
   ): Promise<void> {
     if (!this.isUserLoggedIn()) {
       throw new Error('User must be logged in to perform delete operations');
@@ -108,6 +109,7 @@ export class MockCloudManager<T extends BaseStorageMapping> implements ICloudMan
     }
 
     delete this.cloudData[key];
+    this.remoteMetadata[String(key)] = { digest: '', version: options.version };
   }
 
   async confirm(key: Extract<keyof T, string>, _digest: string): Promise<void> {

@@ -673,6 +673,11 @@ export default class ChunkManager<T extends BaseStorageMapping> {
     return reconstructChunkedData(snapshot);
   }
 
+  /** Drop cached list snapshot so the next read sees remote deletes (e.g. digest tombstone hydrate). */
+  invalidateReadCache(collectionRef: FirebaseFirestoreTypes.CollectionReference): void {
+    this.clearCollectionCache(collectionRef);
+  }
+
   /**
    * Enhanced readData with write awareness
    */

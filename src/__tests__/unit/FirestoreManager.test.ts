@@ -178,6 +178,7 @@ describe('FirestoreManager', () => {
 
     // Mock ChunkManager to handle chunking behavior
     const mockChunkManager = {
+      invalidateReadCache: jest.fn(),
       writeData: jest.fn().mockImplementation(async (collectionRef, key, value, _options) => {
         if (Array.isArray(value) && value.length > 100) {
           // For arrays, write chunks with numeric keys
@@ -321,7 +322,7 @@ describe('FirestoreManager', () => {
       const deleteSpy = jest.spyOn(firestoreManager, 'delete');
 
       await firestoreManager.backup(key, undefined, backupOptions());
-      expect(deleteSpy).toHaveBeenCalledWith(key, expect.any(SessionToken));
+      expect(deleteSpy).toHaveBeenCalledWith(key, expect.any(SessionToken), { version: 1 });
     });
 
     it('should backup document field data', async () => {

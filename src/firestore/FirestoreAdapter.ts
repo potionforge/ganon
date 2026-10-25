@@ -8,11 +8,16 @@ import {
   writeBatch,
   runTransaction,
   getFirestore,
+  deleteField,
 } from '@react-native-firebase/firestore';
 import Log from '../utils/Log';
 import IFirestoreAdapter from '../models/interfaces/IFirestoreAdapter';
 import { GanonConfig } from '../models/config/GanonConfig';
 import { BaseStorageMapping } from '../models/storage/BaseStorageMapping';
+import {
+  createFieldDeleteMarker,
+  isFieldDeleteMarker,
+} from './fieldDeleteMarker';
 
 class FirestoreAdapter<T extends BaseStorageMapping> implements IFirestoreAdapter {
   private firestore: FirebaseFirestoreTypes.Module;
@@ -21,6 +26,24 @@ class FirestoreAdapter<T extends BaseStorageMapping> implements IFirestoreAdapte
   constructor(readonly config: GanonConfig<T>, firestore?: FirebaseFirestoreTypes.Module) {
     this.firestore = firestore ?? getFirestore();
     this._remoteReadonly = config.remoteReadonly ?? false;
+  }
+
+  fieldDelete(): unknown {
+    return createFieldDeleteMarker();
+  }
+
+  private translateFieldDeletes(data: unknown): unknown {
+    if (isFieldDeleteMarker(data)) {
+      return deleteField();
+    }
+    if (data === null || typeof data !== 'object' || Array.isArray(data)) {
+      return data;
+    }
+    const out: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(data as Record<string, unknown>)) {
+      out[key] = this.translateFieldDeletes(value);
+    }
+    return out;
   }
 
   /**
@@ -59,6 +82,11 @@ class FirestoreAdapter<T extends BaseStorageMapping> implements IFirestoreAdapte
       const stringKey = String(key);
       if (stringKey.length === 0) {
         Log.warn(`🔥 ${operationName}: Skipping empty key`);
+        continue;
+      }
+
+      if (isFieldDeleteMarker(value)) {
+        validatedData[stringKey] = value;
         continue;
       }
 
@@ -160,13 +188,14 @@ class FirestoreAdapter<T extends BaseStorageMapping> implements IFirestoreAdapte
 
     try {
       const validatedData = this.validateAndSanitizeData(data, 'setDocument');
+      const payload = this.translateFieldDeletes(validatedData) as Record<string, unknown>;
 
       if (options) {
-        const result = await setDoc(ref, validatedData, options);
+        const result = await setDoc(ref, payload, options);
         Log.verbose(`🔥 setDoc completed with options, result: ${result}`);
         return result;
       } else {
-        const result = await setDoc(ref, validatedData);
+        const result = await setDoc(ref, payload);
         Log.verbose(`🔥 setDoc completed without options, result: ${result}`);
         return result;
       }
@@ -199,11 +228,12 @@ class FirestoreAdapter<T extends BaseStorageMapping> implements IFirestoreAdapte
 
     try {
       const validatedData = this.validateAndSanitizeData(data, 'setDocumentWithTransaction');
+      const payload = this.translateFieldDeletes(validatedData) as Record<string, unknown>;
 
       if (options) {
-        transaction.set(ref, validatedData, options);
+        transaction.set(ref, payload, options);
       } else {
-        transaction.set(ref, validatedData);
+        transaction.set(ref, payload);
       }
     } catch (error) {
       Log.error(`🔥 setDocumentWithTransaction failed: ${error}`);

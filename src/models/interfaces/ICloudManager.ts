@@ -18,6 +18,10 @@ export interface ICloudManager<T extends BaseStorageMapping> {
     options: { digest: string; version: number; session: import('../../sync/SessionToken').default }
   ): Promise<void>;
   fetch(key: Extract<keyof T, string>): Promise<T[keyof T] | undefined>;
-  delete(key: Extract<keyof T, string>, session: import('../../sync/SessionToken').default): Promise<void>;
+  delete(
+    key: Extract<keyof T, string>,
+    session: import('../../sync/SessionToken').default,
+    options: { version: number }
+  ): Promise<void>;
   dangerouslyDelete(): Promise<void>;
 }

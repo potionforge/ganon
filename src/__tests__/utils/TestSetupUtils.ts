@@ -53,7 +53,11 @@ export function createMockFirestoreManager<T extends BaseStorageMapping>(): jest
       (key: Extract<keyof T, string>) => Promise<any>
     >().mockResolvedValue(undefined),
     delete: jest.fn<
-      (key: Extract<keyof T, string>) => Promise<void>
+      (
+        key: Extract<keyof T, string>,
+        session: SessionToken,
+        options: { version: number }
+      ) => Promise<void>
     >().mockResolvedValue(undefined),
     runTransaction: (jest.fn(<R>(callback: (transaction: any) => Promise<R>) => callback({})) as unknown) as FirestoreManager<T>["runTransaction"],
     syncValueWithDigest: jest.fn<
@@ -72,6 +76,7 @@ export function createMockFirestoreManager<T extends BaseStorageMapping>(): jest
       (timestamp: number, options?: { transaction?: any }) => Promise<void>
     >().mockResolvedValue(undefined),
     dangerouslyDelete: jest.fn<() => Promise<void>>().mockResolvedValue(undefined),
+    invalidateSubcollectionReadCache: jest.fn(),
     _backupDocumentField: async () => {},
     _backupSubcollection: async () => {},
     referenceManager: {} as any,
