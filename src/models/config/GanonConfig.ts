@@ -85,6 +85,8 @@ export interface GanonConfig<T extends BaseStorageMapping> {
   /**
    * When true, debounced flushes write the legacy remote_metadata map (step 6.1 dual-write).
    * Defaults to true until step 6.3 sunset; set false only after fleet gate passes.
+   * Must stay true until every client reading the account is on beta-7 or later — earlier
+   * clients read only the legacy map and will resurrect deleted keys if it stops updating.
    */
   legacyMetadataWrites?: boolean;
 }

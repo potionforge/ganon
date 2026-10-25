@@ -209,6 +209,13 @@ export default class OperationRepo<T extends BaseStorageMapping> {
     }
   }
 
+  /**
+   * Refreshes session tokens for ops belonging to the current user before a sync pass.
+   * Ops queued for another user are not restamped: they run once, abort under I11, and are
+   * removed — never deferred. Deferral would re-execute after A returns using `storage.get(key)`
+   * at execution time, but A's local storage was cleared at teardown, so a deferred op would
+   * push B's (or empty) values under A's account.
+   */
   private _restampQueuedOperations(runSession: SessionToken): void {
     for (const operation of this._pendingOperations.values()) {
       if (

@@ -658,11 +658,12 @@ consumer-specific; see `LTG_ADOPTION.md` for one reference plan).
    *vocabulary* is excluded, not the dependency itself.
 
 8. **Status: shipped** (core, `60eb48e`); **open:** `getHydrationState()`, non-authoring `set`
-   (§4.6). **Public API additions** — `getOrDefault`, login-cycle `whenHydrated` (returns
-   `HydrationWaitReason`), opt-in `earlyWriteGuard`, and `digestReadMode` (§6 step 6).
-   Document §8 Q5 contract in Ganon README. Consumer adoption (guard rollout, manager
-   migration, stash-merge tests) is tracked per consumer — see `LTG_ADOPTION.md` for the
-   reference plan.
+   (§4.6), session teardown reports or flushes unsynced queued ops (instead of silently
+   discarding them) so consumers can warn before sign-out. **Public API additions** —
+   `getOrDefault`, login-cycle `whenHydrated` (returns `HydrationWaitReason`), opt-in
+   `earlyWriteGuard`, and `digestReadMode` (§6 step 6). Document §8 Q5 contract in Ganon
+   README. Consumer adoption (guard rollout, manager migration, stash-merge tests) is tracked
+   per consumer — see `LTG_ADOPTION.md` for the reference plan.
 
 Steps 1–3, 7 touch no persisted bytes locally or remotely. Step 6 is the only format-touching
 step and is flagged accordingly. There is no step at which old and new library versions must
