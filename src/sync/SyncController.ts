@@ -95,22 +95,14 @@ export default class SyncController<T extends BaseStorageMapping> implements ISy
     }
 
     const allKeys = this._getAllConfiguredKeys();
-    const errors: string[] = [];
+    const { present, errors } = await this.metadataManager.probeRemoteTenure(allKeys);
 
-    for (const key of allKeys) {
-      try {
-        const remoteMeta = await this.metadataManager.getRemoteMetadataOnly(key);
-        if (remoteMeta) {
-          return { status: 'present' };
-        }
-      } catch (e) {
-        const reason = e instanceof Error ? e.message : String(e);
-        Log.warn(`Ganon: probeRemoteData error checking key ${String(key)}: ${reason}`);
-        errors.push(`${String(key)}: ${reason}`);
-      }
+    if (present) {
+      return { status: 'present' };
     }
 
     if (errors.length > 0) {
+      errors.forEach(msg => Log.warn(`Ganon: probeRemoteData error: ${msg}`));
       return {
         status: 'indeterminate',
         reason: errors.join(' | '),
