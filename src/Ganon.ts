@@ -429,6 +429,11 @@ export default class Ganon<T extends Record<string, any> & BaseStorageMapping> i
 
     Log.info('Ganon: Clearing all data from local storage');
     try {
+      if (this._isHydrationPending()) {
+        this._settleHydrationWaiters('logged-out');
+      }
+      this.syncEngine.bumpSessionLoggedOut();
+      this.syncEngine.clearAllDataCompanionSync();
       this.storageManager.clearAllData();
     } catch (error) {
       Log.error(`Ganon: Failed to clear local data: ${error}`);
