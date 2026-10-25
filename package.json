@@ -9,6 +9,11 @@
     "import": "./dist/index.mjs",
     "require": "./dist/index.cjs"
   },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
   "scripts": {
     "copydiff": "bash scripts/copydiff.sh",
     "test": "jest",
