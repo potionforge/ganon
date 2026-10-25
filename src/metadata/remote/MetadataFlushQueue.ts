@@ -11,6 +11,8 @@ import MetadataStore from '../local/MetadataStore';
 import RemoteMetadataCache from './RemoteMetadataCache';
 import { CancelHandle, Scheduler } from '../../ports/Scheduler';
 import { FirebaseFirestoreTypes } from '@react-native-firebase/firestore';
+import SessionToken from '../../sync/SessionToken';
+import { guardSessionBeforeIo } from '../../sync/sessionGuard';
 
 /**
  * Write-side debounced flush queue for remote metadata map updates.
@@ -20,6 +22,8 @@ export default class MetadataFlushQueue<T extends BaseStorageMapping> {
   private pendingKeys = new Set<string>();
   private flushHandle: CancelHandle | null = null;
   private docRef: FirebaseFirestoreTypes.DocumentReference | null = null;
+  private scheduledSession: SessionToken | null = null;
+  private getSession?: () => SessionToken;
 
   constructor(
     private referenceManager: FirestoreReferenceManager<T>,
@@ -34,9 +38,14 @@ export default class MetadataFlushQueue<T extends BaseStorageMapping> {
     private writeLegacyMetadata: boolean = false
   ) {}
 
+  setSessionProvider(provider: () => SessionToken): void {
+    this.getSession = provider;
+  }
+
   enqueue(key: string): void {
     this.pendingKeys.add(key);
     if (this.pendingKeys.size > this.MAX_PENDING_KEYS) {
+      this.scheduledSession = this.getSession?.() ?? null;
       void this.flush().catch(error => Log.error(`Ganon: Overflow flush failed: ${error}`));
       return;
     }
@@ -44,11 +53,18 @@ export default class MetadataFlushQueue<T extends BaseStorageMapping> {
   }
 
   async flush(): Promise<void> {
-    if (!this.userManager.isUserLoggedIn() || this.pendingKeys.size === 0) {
+    const session = this.scheduledSession ?? this.getSession?.();
+    if (!session || !this.userManager.isUserLoggedIn() || this.pendingKeys.size === 0) {
       return;
     }
 
     await this.remoteCache.fetch();
+
+    if (!guardSessionBeforeIo(session, 'MetadataFlushQueue.pre-build-updates')) {
+      this.scheduledSession = null;
+      return;
+    }
+
     const updates: MetadataStorage = {};
     const cached = this.remoteCache.getCached();
 
@@ -63,10 +79,17 @@ export default class MetadataFlushQueue<T extends BaseStorageMapping> {
     }
 
     if (this.writeLegacyMetadata) {
-      await this._batchUpdateRemote(updates);
+      await this._batchUpdateRemote(updates, session);
     }
+
+    if (!guardSessionBeforeIo(session, 'MetadataFlushQueue.pre-mergeIntoCache')) {
+      this.scheduledSession = null;
+      return;
+    }
+
     this.remoteCache.mergeIntoCache(updates);
     this.pendingKeys.clear();
+    this.scheduledSession = null;
   }
 
   cancelAll(): void {
@@ -76,6 +99,7 @@ export default class MetadataFlushQueue<T extends BaseStorageMapping> {
     }
     this.pendingKeys.clear();
     this.docRef = null;
+    this.scheduledSession = null;
   }
 
   destroy(): void {
@@ -90,25 +114,31 @@ export default class MetadataFlushQueue<T extends BaseStorageMapping> {
     if (this.flushHandle) {
       this.flushHandle.cancel();
     }
+    this.scheduledSession = this.getSession?.() ?? null;
     this.flushHandle = this.scheduler.schedule(() => {
       if (!this.userManager.isUserLoggedIn()) return;
       this.flush().catch(error => Log.error(`Ganon: Scheduled flush failed: ${error}`));
     }, this.debounceMs);
   }
 
-  private _getDocRef(): FirebaseFirestoreTypes.DocumentReference {
+  private _getDocRef(session: SessionToken): FirebaseFirestoreTypes.DocumentReference {
+    const userId = session.userId;
+    if (!userId) {
+      throw new Error('Ganon: MetadataFlushQueue requires session.userId for doc ref');
+    }
     if (!this.docRef) {
-      const backupRef = this.referenceManager.getBackupRef();
+      const backupRef = this.referenceManager.getBackupRefForUser(userId);
       this.docRef = this.referenceManager.getDocumentRef(backupRef, this.documentKey);
     }
     return this.docRef;
   }
 
-  private async _batchUpdateRemote(updates: MetadataStorage): Promise<void> {
-    // Write only pending keys; merge:true deep-merges nested map entries server-side.
-    // Do not spread remoteCache — that re-asserts stale entries for keys we did not change.
+  private async _batchUpdateRemote(updates: MetadataStorage, session: SessionToken): Promise<void> {
+    if (!guardSessionBeforeIo(session, 'MetadataFlushQueue.setDocument')) {
+      return;
+    }
     await this.adapter.setDocument(
-      this._getDocRef(),
+      this._getDocRef(session),
       { [REMOTE_METADATA_KEY]: updates },
       { merge: true }
     );

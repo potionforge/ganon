@@ -66,7 +66,11 @@ function createEngine(
     storage,
     deps?.firestore ?? createMockFirestoreManager<TestStorage>(),
     deps?.metadataManager ?? createMockMetadataManager<TestStorage>(),
-    { addOperation: jest.fn() } as unknown as OperationRepo<TestStorage>,
+    {
+      addOperation: jest.fn(),
+      configureSession: jest.fn(),
+      getActiveProcessOperations: jest.fn().mockReturnValue(null),
+    } as unknown as OperationRepo<TestStorage>,
     userManager,
     config,
     undefined,
@@ -217,6 +221,8 @@ describe('SyncEngine start/stop lifecycle', () => {
     const firstHydrate = engine.hydrate();
     await Promise.resolve();
     await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
     expect(firestore.fetch).toHaveBeenCalledTimes(1);
 
     // Logout: stop() must release the dedupe handle so a re-login runs a fresh pass.
@@ -284,6 +290,7 @@ describe('SyncEngine start/stop lifecycle', () => {
     const hydratePromise = engine.hydrate(undefined, undefined, integrityConfig);
     await Promise.resolve();
     releaseMetadata();
+    await Promise.resolve();
     await Promise.resolve();
     await Promise.resolve();
 
@@ -516,7 +523,11 @@ describe('SyncEngine markAsPending autoStartSync default (PR #4 regression)', ()
       storage,
       createMockFirestoreManager<TestStorage>(),
       metadataManager,
-      { addOperation: jest.fn() } as unknown as OperationRepo<TestStorage>,
+      {
+      addOperation: jest.fn(),
+      configureSession: jest.fn(),
+      getActiveProcessOperations: jest.fn().mockReturnValue(null),
+    } as unknown as OperationRepo<TestStorage>,
       createMockUserManager<TestStorage>(),
       config,
       undefined,

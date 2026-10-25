@@ -6,18 +6,23 @@ import StorageManager from "../../managers/StorageManager";
 import { BaseStorageMapping } from "../../models/storage/BaseStorageMapping";
 import SyncOperationResult from "../../models/sync/SyncOperationResult";
 import MetadataManager from "../../metadata/MetadataManager";
+import SessionToken from "../SessionToken";
 
 export default abstract class BaseSyncOperation<T extends BaseStorageMapping> implements ISyncOperation<T> {
   protected retryCount = 0;
   protected maxRetries = 3;
   protected baseRetryDelay = 1_000;
+  session: SessionToken;
 
   constructor(
     protected key: Extract<keyof T, string>,
     protected storage: StorageManager<T>,
     protected firestore: FirestoreManager<T>,
-    protected metadataManager: MetadataManager<T>
-  ) {}
+    protected metadataManager: MetadataManager<T>,
+    session: SessionToken
+  ) {
+    this.session = session;
+  }
 
   abstract execute(): Promise<SyncOperationResult<T>>;
   abstract serialize(): object;

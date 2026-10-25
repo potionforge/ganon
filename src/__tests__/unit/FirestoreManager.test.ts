@@ -10,6 +10,15 @@ import DocumentOrCollection from '../../models/firestore/DocumentOrCollection';
 import UserManager from '../../managers/UserManager';
 import FirestoreAdapter from '../../firestore/FirestoreAdapter';
 import { GanonConfig } from '../../models/config/GanonConfig';
+import { testSession } from '../utils/testSession';
+import SessionToken from '../../sync/SessionToken';
+
+const backupOptions = (overrides?: Partial<{ digest: string; version: number; session: SessionToken }>) => ({
+  digest: 'test-digest',
+  version: 1,
+  session: testSession,
+  ...overrides,
+});
 
 // Mock dependencies
 jest.mock('@react-native-firebase/firestore', () => ({
@@ -114,6 +123,7 @@ describe('FirestoreManager', () => {
 
     // Mock user logged in
     mockUserManager.isUserLoggedIn.mockReturnValue(true);
+    mockUserManager.getCurrentUser.mockReturnValue('test-user');
 
     // Mock referenceManager.getRefForKey to handle document vs subcollection keys
     jest.spyOn(firestoreManager['referenceManager'], 'getRefForKey').mockImplementation((key: Extract<keyof TestStorageMapping, string>) => {
@@ -168,6 +178,7 @@ describe('FirestoreManager', () => {
 
     // Mock ChunkManager to handle chunking behavior
     const mockChunkManager = {
+      invalidateReadCache: jest.fn(),
       writeData: jest.fn().mockImplementation(async (collectionRef, key, value, _options) => {
         if (Array.isArray(value) && value.length > 100) {
           // For arrays, write chunks with numeric keys
@@ -255,7 +266,7 @@ describe('FirestoreManager', () => {
       const key = 'user' as keyof TestStorageMapping;
       const value = { id: '123', name: 'Test User', email: 'test@example.com' };
 
-      await firestoreManager.backup(key, value, { digest: 'test-digest', version: 1 });
+      await firestoreManager.backup(key, value, backupOptions());
 
       expect((firestoreManager as any).mockAdapter.setDocument).toHaveBeenCalled();
     });
@@ -264,7 +275,7 @@ describe('FirestoreManager', () => {
       const key = 'count' as keyof TestStorageMapping;
       const value = 42;
 
-      await firestoreManager.backup(key, value, { digest: 'test-digest', version: 1 });
+      await firestoreManager.backup(key, value, backupOptions());
 
       expect((firestoreManager as any).mockAdapter.setDocument).toHaveBeenCalledWith(
         expect.anything(),
@@ -279,7 +290,7 @@ describe('FirestoreManager', () => {
       const key = 'settings' as keyof TestStorageMapping;
       const value = { theme: 'dark', notifications: true };
 
-      await firestoreManager.backup(key, value, { digest: 'test-digest', version: 1 });
+      await firestoreManager.backup(key, value, backupOptions());
 
       // For small data, setDocument is called; for large data, writeBatch is called
       const setDocumentCalled = (firestoreManager as any).mockAdapter.setDocument.mock.calls.length > 0;
@@ -287,20 +298,22 @@ describe('FirestoreManager', () => {
       expect(setDocumentCalled || writeBatchCalled).toBe(true);
     });
 
-    it('should throw error when user is not logged in', async () => {
+    it('should no-op backup when session is stale (logged out)', async () => {
       mockUserManager.isUserLoggedIn.mockReturnValue(false);
+      const staleSession = SessionToken.forTests('test-user', mockUserManager);
 
       const key = 'testKey' as keyof TestStorageMapping;
       const value = { test: 'value' };
 
-      await expect(firestoreManager.backup(key, value, { digest: 'test-digest', version: 1 })).rejects.toThrow('Cannot perform backup operation: no user is logged in');
+      await firestoreManager.backup(key, value, backupOptions({ session: staleSession }));
+      expect(mockAdapter.setDocument).not.toHaveBeenCalled();
     });
 
     it('should throw error for invalid key', async () => {
       const key = '' as keyof TestStorageMapping;
       const value = { test: 'value' };
 
-      await expect(firestoreManager.backup(key, value, { digest: 'test-digest', version: 1 })).rejects.toThrow('Invalid key provided for backup operation');
+      await expect(firestoreManager.backup(key, value, backupOptions())).rejects.toThrow('Invalid key provided for backup operation');
     });
 
     it('should treat undefined value as deletion', async () => {
@@ -308,15 +321,15 @@ describe('FirestoreManager', () => {
       const key = 'settings' as keyof TestStorageMapping;
       const deleteSpy = jest.spyOn(firestoreManager, 'delete');
 
-      await firestoreManager.backup(key, undefined, { digest: 'test-digest', version: 1 });
-      expect(deleteSpy).toHaveBeenCalledWith(key);
+      await firestoreManager.backup(key, undefined, backupOptions());
+      expect(deleteSpy).toHaveBeenCalledWith(key, expect.any(SessionToken), { version: 1 });
     });
 
     it('should backup document field data', async () => {
       const key = 'user' as Extract<keyof TestStorageMapping, string>;
       const value = { name: 'John', email: 'john@example.com' };
 
-      await firestoreManager.backup(key, value, { digest: 'test-digest', version: 1 });
+      await firestoreManager.backup(key, value, backupOptions());
 
       expect(mockAdapter.setDocument).toHaveBeenCalledWith(
         expect.any(Object),
@@ -332,14 +345,14 @@ describe('FirestoreManager', () => {
       const key = 'workouts' as Extract<keyof TestStorageMapping, string>;
       const value = { workout1: { name: 'Morning Run' } };
 
-      await firestoreManager.backup(key, value, { digest: 'test-digest', version: 1 });
+      await firestoreManager.backup(key, value, backupOptions());
 
       const chunkManager = (firestoreManager as any).chunkManager;
       expect(chunkManager.writeData).toHaveBeenCalledWith(
         expect.any(Object),
         key,
         value,
-        { digest: 'test-digest', version: 1 }
+        backupOptions()
       );
     });
 
@@ -356,7 +369,7 @@ describe('FirestoreManager', () => {
             notifications: true
           }
         };
-        await firestoreManager.backup(key, initialValue, { digest: 'test-digest', version: 1 });
+        await firestoreManager.backup(key, initialValue, backupOptions());
 
         // Then write with some fields deleted
         const updatedValue = {
@@ -367,7 +380,7 @@ describe('FirestoreManager', () => {
             // notifications deleted
           }
         };
-        await firestoreManager.backup(key, updatedValue, { digest: 'test-digest', version: 1 });
+        await firestoreManager.backup(key, updatedValue, backupOptions());
 
         // Should use set with merge for document fields
         expect(mockAdapter.setDocument).toHaveBeenLastCalledWith(
@@ -399,7 +412,7 @@ describe('FirestoreManager', () => {
             }
           }
         };
-        await firestoreManager.backup(testKey, initialValue, { digest: 'test-digest', version: 1 });
+        await firestoreManager.backup(testKey, initialValue, backupOptions());
 
         // Then write with some fields deleted
         const updatedValue = {
@@ -413,7 +426,7 @@ describe('FirestoreManager', () => {
           }
           // workout2 deleted
         };
-        await firestoreManager.backup(testKey, updatedValue, { digest: 'test-digest', version: 1 });
+        await firestoreManager.backup(testKey, updatedValue, backupOptions());
 
         // Should use ChunkManager's writeData which handles field deletions
         const chunkManager = (firestoreManager as any).chunkManager;
@@ -421,7 +434,7 @@ describe('FirestoreManager', () => {
           expect.any(Object),
           testKey,
           updatedValue,
-          { digest: 'test-digest', version: 1 }
+          backupOptions()
         );
 
         // Verify the mock ChunkManager implementation handles field deletions
@@ -441,14 +454,14 @@ describe('FirestoreManager', () => {
           { id: 1, name: 'Morning Run', duration: 30, metadata: { created: '2024-01-01' } },
           { id: 2, name: 'Evening Walk', duration: 45, metadata: { created: '2024-01-01' } }
         ];
-        await firestoreManager.backup(testKey, initialValue, { digest: 'test-digest', version: 1 });
+        await firestoreManager.backup(testKey, initialValue, backupOptions());
 
         // Then write with some fields deleted from array items
         const updatedValue = [
           { id: 1, name: 'Morning Run' }, // duration and metadata deleted
           { id: 2, name: 'Evening Walk', duration: 45 } // metadata deleted
         ];
-        await firestoreManager.backup(testKey, updatedValue, { digest: 'test-digest', version: 1 });
+        await firestoreManager.backup(testKey, updatedValue, backupOptions());
 
         // Should use ChunkManager's writeData which handles field deletions
         const chunkManager = (firestoreManager as any).chunkManager;
@@ -456,7 +469,7 @@ describe('FirestoreManager', () => {
           expect.any(Object),
           testKey,
           updatedValue,
-          { digest: 'test-digest', version: 1 }
+          backupOptions()
         );
 
         // Verify the mock ChunkManager implementation handles field deletions
@@ -489,7 +502,7 @@ describe('FirestoreManager', () => {
             }
           ]
         };
-        await firestoreManager.backup(testKey, initialValue, { digest: 'test-digest', version: 1 });
+        await firestoreManager.backup(testKey, initialValue, backupOptions());
 
         // Then write with some fields deleted from nested arrays
         const updatedValue = {
@@ -504,7 +517,7 @@ describe('FirestoreManager', () => {
             // Walking category deleted
           ]
         };
-        await firestoreManager.backup(testKey, updatedValue, { digest: 'test-digest', version: 1 });
+        await firestoreManager.backup(testKey, updatedValue, backupOptions());
 
         // Should use ChunkManager's writeData which handles field deletions
         const chunkManager = (firestoreManager as any).chunkManager;
@@ -512,7 +525,7 @@ describe('FirestoreManager', () => {
           expect.any(Object),
           testKey,
           updatedValue,
-          { digest: 'test-digest', version: 1 }
+          backupOptions()
         );
 
         // Verify the mock ChunkManager implementation handles field deletions
@@ -587,7 +600,7 @@ describe('FirestoreManager', () => {
         const key = 'notes' as keyof TestStorageMapping;
         const value = ['test note'];
 
-        await firestoreManager.backup(key, value, { digest: 'test-digest', version: 1 });
+        await firestoreManager.backup(key, value, backupOptions());
 
         expect(mockAdapter.setDocument).toHaveBeenCalledWith(
           expect.anything(),
@@ -602,7 +615,7 @@ describe('FirestoreManager', () => {
         const key = 'count' as keyof TestStorageMapping;
         const value = 42;
 
-        await firestoreManager.backup(key, value, { digest: 'test-digest', version: 1 });
+        await firestoreManager.backup(key, value, backupOptions());
 
         expect(mockAdapter.setDocument).toHaveBeenCalledWith(
           expect.anything(),
@@ -617,7 +630,7 @@ describe('FirestoreManager', () => {
         const key = 'docKey' as keyof TestStorageMapping;
         const value = true;
 
-        await firestoreManager.backup(key, value, { digest: 'test-digest', version: 1 });
+        await firestoreManager.backup(key, value, backupOptions());
 
         expect(mockAdapter.setDocument).toHaveBeenCalledWith(
           expect.anything(),
@@ -632,7 +645,7 @@ describe('FirestoreManager', () => {
         const key = 'docKey' as keyof TestStorageMapping;
         const value = [1, 2, 3];
 
-        await firestoreManager.backup(key, value, { digest: 'test-digest', version: 1 });
+        await firestoreManager.backup(key, value, backupOptions());
 
         expect(mockAdapter.setDocument).toHaveBeenCalledWith(
           expect.anything(),
@@ -647,7 +660,7 @@ describe('FirestoreManager', () => {
         const key = 'docKey' as keyof TestStorageMapping;
         const value = null;
 
-        await firestoreManager.backup(key, value, { digest: 'test-digest', version: 1 });
+        await firestoreManager.backup(key, value, backupOptions());
 
         expect(mockAdapter.setDocument).toHaveBeenCalledWith(
           expect.anything(),
@@ -738,7 +751,7 @@ describe('FirestoreManager', () => {
         const key = 'stringValue' as keyof TestStorageMapping;
         const value = 'test string';
 
-        await firestoreManager.backup(key, value, { digest: 'test-digest', version: 1 });
+        await firestoreManager.backup(key, value, backupOptions());
 
         expect(collection).toHaveBeenCalled();
         expect(mockAdapter.setDocument).toHaveBeenCalledWith(
@@ -751,7 +764,7 @@ describe('FirestoreManager', () => {
         const key = 'numberValue' as keyof TestStorageMapping;
         const value = 42;
 
-        await firestoreManager.backup(key, value, { digest: 'test-digest', version: 1 });
+        await firestoreManager.backup(key, value, backupOptions());
 
         expect(mockAdapter.setDocument).toHaveBeenCalledWith(
           expect.anything(),
@@ -763,7 +776,7 @@ describe('FirestoreManager', () => {
         const key = 'booleanValue' as keyof TestStorageMapping;
         const value = true;
 
-        await firestoreManager.backup(key, value, { digest: 'test-digest', version: 1 });
+        await firestoreManager.backup(key, value, backupOptions());
 
         expect(mockAdapter.setDocument).toHaveBeenCalledWith(
           expect.anything(),
@@ -775,7 +788,7 @@ describe('FirestoreManager', () => {
         const key = 'arrayValue' as keyof TestStorageMapping;
         const value = [1, 2, 3];
 
-        await firestoreManager.backup(key, value, { digest: 'test-digest', version: 1 });
+        await firestoreManager.backup(key, value, backupOptions());
 
         expect(mockAdapter.setDocument).toHaveBeenCalledWith(
           expect.anything(),
@@ -787,7 +800,7 @@ describe('FirestoreManager', () => {
         const key = 'subcollectionKey' as keyof TestStorageMapping;
         const value = null;
 
-        await firestoreManager.backup(key, value, { digest: 'test-digest', version: 1 });
+        await firestoreManager.backup(key, value, backupOptions());
 
         expect(mockAdapter.setDocument).toHaveBeenCalledWith(
           expect.anything(),
@@ -799,7 +812,7 @@ describe('FirestoreManager', () => {
         const key = 'subcollectionKey' as keyof TestStorageMapping;
         const value = { test: 'value' };
 
-        await firestoreManager.backup(key, value, { digest: 'test-digest', version: 1 });
+        await firestoreManager.backup(key, value, backupOptions());
 
         expect(mockAdapter.setDocument).toHaveBeenCalledWith(
           expect.anything(),
@@ -913,7 +926,7 @@ describe('FirestoreManager', () => {
         const key = 'notes' as keyof TestStorageMapping;
         const value: string[] = [];
 
-        await firestoreManager.backup(key, value, { digest: 'test-digest', version: 1 });
+        await firestoreManager.backup(key, value, backupOptions());
 
         expect(mockAdapter.setDocument).toHaveBeenCalledWith(
           expect.anything(),
@@ -929,7 +942,7 @@ describe('FirestoreManager', () => {
         const values = [0, ''];
 
         for (const value of values) {
-          await firestoreManager.backup(key, value, { digest: 'test-digest', version: 1 });
+          await firestoreManager.backup(key, value, backupOptions());
 
           expect(mockAdapter.setDocument).toHaveBeenCalledWith(
             expect.anything(),
@@ -945,7 +958,7 @@ describe('FirestoreManager', () => {
         const key = 'docKey' as keyof TestStorageMapping;
         const value = [[1, 2], [3, [4, 5]]];
 
-        await firestoreManager.backup(key, value, { digest: 'test-digest', version: 1 });
+        await firestoreManager.backup(key, value, backupOptions());
 
         expect(mockAdapter.setDocument).toHaveBeenCalledWith(
           expect.anything(),
@@ -963,7 +976,7 @@ describe('FirestoreManager', () => {
       const key = 'user' as keyof TestStorageMapping;
       const value = { id: '123', name: 'Test User', email: 'test@example.com', large: Array(1000).fill('test') };
 
-      await firestoreManager.backup(key, value, { digest: 'test-digest', version: 1 });
+      await firestoreManager.backup(key, value, backupOptions());
 
       expect(mockAdapter.setDocument).toHaveBeenCalledWith(
         expect.anything(),
@@ -1003,7 +1016,7 @@ describe('FirestoreManager', () => {
         }
       };
 
-      await firestoreManager.backup(key, value, { digest: 'test-digest', version: 1 });
+      await firestoreManager.backup(key, value, backupOptions());
 
       expect(mockAdapter.setDocument).toHaveBeenCalledWith(
         expect.anything(),
@@ -1020,7 +1033,7 @@ describe('FirestoreManager', () => {
       const key = 'notes' as keyof TestStorageMapping;
       const value = ['note1', 'note2', 'note3'];
 
-      await firestoreManager.backup(key, value, { digest: 'test-digest', version: 1 });
+      await firestoreManager.backup(key, value, backupOptions());
 
       expect(mockAdapter.setDocument).toHaveBeenCalledWith(
         expect.anything(),
@@ -1062,7 +1075,7 @@ describe('FirestoreManager', () => {
         }
       ] as unknown as FirebaseFirestoreTypes.QueryDocumentSnapshot[];
 
-      await firestoreManager.backup(key, value, { digest: 'test-digest', version: 1 });
+      await firestoreManager.backup(key, value, backupOptions());
 
       // Verify chunking was attempted
       expect(mockCollection.doc).toHaveBeenCalled();
@@ -1139,7 +1152,7 @@ describe('FirestoreManager', () => {
         }
       ] as unknown as FirebaseFirestoreTypes.QueryDocumentSnapshot[];
 
-      await firestoreManager.backup(key, value, { digest: 'test-digest', version: 1 });
+      await firestoreManager.backup(key, value, backupOptions());
 
       // Verify chunking was attempted
       expect(mockCollection.doc).toHaveBeenCalled();
@@ -1156,7 +1169,7 @@ describe('FirestoreManager', () => {
       const key = 'arrayValue' as keyof TestStorageMapping;
       const value = ['value1', 'value2', 'value3'];
 
-      await firestoreManager.backup(key, value, { digest: 'test-digest', version: 1 });
+      await firestoreManager.backup(key, value, backupOptions());
 
       expect(mockAdapter.setDocument).toHaveBeenCalledWith(
         expect.anything(),
@@ -1182,7 +1195,7 @@ describe('FirestoreManager', () => {
         return await callback(mockTransaction);
       });
 
-      const result = await firestoreManager.runTransaction(transactionCallback);
+      const result = await firestoreManager.runTransaction(testSession, transactionCallback);
 
       expect(result).toBe(mockResult);
       expect(mockAdapter.runTransaction).toHaveBeenCalledWith(transactionCallback);
@@ -1204,7 +1217,7 @@ describe('FirestoreManager', () => {
       });
 
       // Start all transactions simultaneously
-      const promises = callbacks.map(callback => firestoreManager.runTransaction(callback));
+      const promises = callbacks.map(callback => firestoreManager.runTransaction(testSession, callback));
       
       // Wait for all to complete
       const transactionResults = await Promise.all(promises);
@@ -1237,7 +1250,7 @@ describe('FirestoreManager', () => {
       );
 
       try {
-        await expect(firestoreManager.runTransaction(transactionCallback))
+        await expect(firestoreManager.runTransaction(testSession, transactionCallback))
           .rejects.toThrow('Transaction timed out - possible deadlock or large data processing');
       } finally {
         // Clean up the timeouts to prevent open handles
@@ -1264,8 +1277,8 @@ describe('FirestoreManager', () => {
         });
 
       // Start both transactions
-      const promise1 = firestoreManager.runTransaction(callback1);
-      const promise2 = firestoreManager.runTransaction(callback2);
+      const promise1 = firestoreManager.runTransaction(testSession, callback1);
+      const promise2 = firestoreManager.runTransaction(testSession, callback2);
 
       // First should fail, second should succeed
       await expect(promise1).rejects.toThrow('First transaction failed');
@@ -1279,7 +1292,7 @@ describe('FirestoreManager', () => {
 
       mockAdapter.runTransaction.mockRejectedValue(permissionError);
 
-      await expect(firestoreManager.runTransaction(transactionCallback))
+      await expect(firestoreManager.runTransaction(testSession, transactionCallback))
         .rejects.toThrow('Permission denied for transaction');
     });
 
@@ -1289,7 +1302,7 @@ describe('FirestoreManager', () => {
 
       mockAdapter.runTransaction.mockRejectedValue(timeoutError);
 
-      await expect(firestoreManager.runTransaction(transactionCallback))
+      await expect(firestoreManager.runTransaction(testSession, transactionCallback))
         .rejects.toThrow('Network timeout during transaction');
     });
 
@@ -1299,16 +1312,19 @@ describe('FirestoreManager', () => {
 
       mockAdapter.runTransaction.mockRejectedValue(abortedError);
 
-      await expect(firestoreManager.runTransaction(transactionCallback))
+      await expect(firestoreManager.runTransaction(testSession, transactionCallback))
         .rejects.toThrow('Transaction was aborted: Transaction was aborted');
     });
 
-    it('should throw error when user is not logged in', async () => {
+    it('should no-op when session is stale (logged out)', async () => {
       mockUserManager.isUserLoggedIn.mockReturnValue(false);
       const transactionCallback = jest.fn();
+      const staleSession = new SessionToken(0, 'test@example.com', () => 0, mockUserManager);
 
-      await expect(firestoreManager.runTransaction(transactionCallback))
-        .rejects.toThrow('Cannot perform transaction: no user is logged in');
+      const result = await firestoreManager.runTransaction(staleSession, transactionCallback);
+
+      expect(result).toBeUndefined();
+      expect(transactionCallback).not.toHaveBeenCalled();
     });
 
     it('should maintain transaction queue state correctly', async () => {
@@ -1324,8 +1340,8 @@ describe('FirestoreManager', () => {
       });
 
       // Start transactions
-      const promise1 = firestoreManager.runTransaction(callbacks[0]);
-      const promise2 = firestoreManager.runTransaction(callbacks[1]);
+      const promise1 = firestoreManager.runTransaction(testSession, callbacks[0]);
+      const promise2 = firestoreManager.runTransaction(testSession, callbacks[1]);
 
       // Verify queue state during execution
       expect((firestoreManager as any).transactionQueue.length).toBe(1); // Second transaction queued
@@ -1353,7 +1369,7 @@ describe('FirestoreManager', () => {
       });
 
       // Start all transactions
-      const promises = callbacks.map(callback => firestoreManager.runTransaction(callback));
+      const promises = callbacks.map(callback => firestoreManager.runTransaction(testSession, callback));
       
       // Verify all complete
       const transactionResults = await Promise.all(promises);

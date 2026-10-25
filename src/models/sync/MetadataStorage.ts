@@ -1,11 +1,7 @@
-import { SyncStatus } from "./SyncStatus";
+import { RemoteDigestEntry } from './RemoteDigestEntry';
 
 interface MetadataStorage {
-  [key: string]: {
-    d: string;  // digest
-    v: number;  // version
-    s?: SyncStatus;  // sync status
-  };
+  [key: string]: RemoteDigestEntry;
 }
 
 export default MetadataStorage;

@@ -7,6 +7,7 @@ import { BaseStorageMapping } from '../../models/storage/BaseStorageMapping';
 import { MockMetadataManager } from '../../__mocks__/MockMetadataManager';
 import { GanonConfig } from '../../models/config/GanonConfig';
 import { CloudBackupConfig } from '../../models/config/CloudBackupConfig';
+import SessionToken from '../../sync/SessionToken';
 
 /**
  * Creates a mock StorageManager with internal storage that properly tracks set/get operations
@@ -42,25 +43,40 @@ export function createMockFirestoreManager<T extends BaseStorageMapping>(): jest
     cloudConfig: {} as any,
     adapter: {} as any,
     backup: jest.fn<
-      (key: Extract<keyof T, string>, value: any, options?: { transaction?: any; digest?: string; version?: number }) => Promise<void>
+      (
+        key: Extract<keyof T, string>,
+        value: any,
+        options: { transaction?: any; digest: string; version: number; session: SessionToken }
+      ) => Promise<void>
     >().mockResolvedValue(undefined),
     fetch: jest.fn<
       (key: Extract<keyof T, string>) => Promise<any>
     >().mockResolvedValue(undefined),
     delete: jest.fn<
-      (key: Extract<keyof T, string>) => Promise<void>
+      (
+        key: Extract<keyof T, string>,
+        session: SessionToken,
+        options: { version: number }
+      ) => Promise<void>
     >().mockResolvedValue(undefined),
     runTransaction: (jest.fn(<R>(callback: (transaction: any) => Promise<R>) => callback({})) as unknown) as FirestoreManager<T>["runTransaction"],
     syncValueWithDigest: jest.fn<
-      (key: Extract<keyof T, string>, value: any, digest: string, version: number) => Promise<void>
-    >().mockImplementation(async (key, value, _digest, _version) => {
-      await (mock as any).backup(key, value, { digest: 'mock-digest', version: 1 });
+      (
+        key: Extract<keyof T, string>,
+        value: any,
+        digest: string,
+        version: number,
+        session: SessionToken
+      ) => Promise<void>
+    >().mockImplementation(async (key, value, digest, version, session) => {
+      await (mock as any).backup(key, value, { digest, version, session });
     }),
     writeValueWithDigest: jest.fn().mockResolvedValue(undefined as void),
     backupLastBackupToUserDocument: jest.fn<
       (timestamp: number, options?: { transaction?: any }) => Promise<void>
     >().mockResolvedValue(undefined),
     dangerouslyDelete: jest.fn<() => Promise<void>>().mockResolvedValue(undefined),
+    invalidateSubcollectionReadCache: jest.fn(),
     _backupDocumentField: async () => {},
     _backupSubcollection: async () => {},
     referenceManager: {} as any,
@@ -84,10 +100,14 @@ export function createMockMetadataManager<T extends BaseStorageMapping>(): jest.
     hydrateMetadata: jest.fn(),
     needsHydration: jest.fn(),
     getRemoteMetadataOnly: jest.fn(),
+    getRemoteMetaForKey: jest.fn().mockReturnValue(undefined),
     ensureConsistency: jest.fn(),
     invalidateCache: jest.fn(),
     invalidateAllRemoteCaches: jest.fn(),
     cancelPendingOperations: jest.fn(),
+    setSessionProvider: jest.fn(),
+    clearLocalMetadataSync: jest.fn(),
+    getOperationSession: jest.fn(),
     recordLocalChange: jest.fn(),
     persistLocalChange: jest.fn(),
     recordSyncedState: jest.fn(),

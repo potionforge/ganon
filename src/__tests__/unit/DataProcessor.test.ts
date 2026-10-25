@@ -228,7 +228,7 @@ describe('DataProcessor', () => {
       });
     });
 
-    test('should remove empty nested objects after undefined removal', () => {
+    test('should keep nested empty object after undefined-only fields are removed', () => {
       const input = {
         user: {
           profile: {
@@ -243,6 +243,7 @@ describe('DataProcessor', () => {
       const result = processor.sanitizeForFirestore(input);
       expect(result).toEqual({
         user: {
+          profile: {},
           settings: {
             theme: 'dark'
           }

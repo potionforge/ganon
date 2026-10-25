@@ -29,7 +29,10 @@ import type { RemoteDataProbeResult } from "../models/sync/RemoteDataProbeResult
 import { Clock, SystemClock } from "../ports/Clock";
 import { CancelHandle, Scheduler, SystemScheduler } from "../ports/Scheduler";
 import KeyRouter from "../routing/KeyRouter";
-import HydrationSession from "./HydrationSession";
+import SessionToken from "./SessionToken";
+
+/** Max wait for in-flight processOperations during logout; correctness is session-fenced I/O, not this drain. */
+export const PROCESS_OPERATIONS_FENCE_MS = 1_000;
 
 /** Debounce delay for batched markAsPending → metadata flush scheduling. */
 export const MARK_AS_PENDING_DEBOUNCE_MS = 50;
@@ -71,8 +74,10 @@ export default class SyncEngine<T extends BaseStorageMapping> implements ISyncEn
   private resolvedConfig: ResolvedGanonConfig<T>;
   /** True after start() arms the engine; cleared by stop(). Idempotent start while running. */
   private running = false;
-  /** Bumped on stop() to invalidate in-flight hydrate passes across identity boundaries. */
+  /** In-memory generation; never persisted. Bumped on stop / logout bump / mint. */
   private hydrationGeneration = 0;
+  private _currentMintUserId: string | null = null;
+  private _lastMintedGeneration = -1;
 
   constructor(
     private storage: StorageManager<T>,
@@ -88,6 +93,66 @@ export default class SyncEngine<T extends BaseStorageMapping> implements ISyncEn
     this.resolvedConfig = resolveGanonConfig(config);
     this.keyRouter = keyRouter ?? new KeyRouter(config.cloudConfig);
     Log.verbose('Ganon: SyncEngine.constructor');
+    this.operationRepo.configureSession({
+      getCurrentUserId: () => this.userManager.getCurrentUser(),
+      getRunSession: () => this.captureSessionForOperation(),
+    });
+    this.metadataManager.setSessionProvider(() => this.captureSessionForOperation());
+  }
+
+  mintSession(userId: string): void {
+    this.hydrationGeneration += 1;
+    this._currentMintUserId = userId;
+    this._lastMintedGeneration = this.hydrationGeneration;
+  }
+
+  bumpSessionLoggedOut(): void {
+    this.hydrationGeneration += 1;
+    this._currentMintUserId = null;
+    this._lastMintedGeneration = -1;
+  }
+
+  captureSessionForOperation(): SessionToken {
+    const userId = this._currentMintUserId ?? this.userManager.getCurrentUser() ?? null;
+    return this._newSessionToken(this.hydrationGeneration, userId);
+  }
+
+  cancelMarkDebounceSync(): void {
+    if (this._markDebounceHandle) {
+      this._markDebounceHandle.cancel();
+      this._markDebounceHandle = null;
+    }
+    this._pendingMarkKeys.clear();
+  }
+
+  /** Synchronous RAM/queue teardown companion to Ganon.clearAllData() (after session bump). */
+  clearAllDataCompanionSync(): void {
+    this.metadataManager.clearLocalMetadataSync();
+    this.metadataManager.cancelPendingOperations();
+    this.operationRepo.clearAll();
+    this.cancelMarkDebounceSync();
+  }
+
+  private _newSessionToken(generation: number, userId: string | null): SessionToken {
+    return new SessionToken(
+      generation,
+      userId,
+      () => this.hydrationGeneration,
+      this.userManager
+    );
+  }
+
+  private _ensureStartMint(): void {
+    if (!this.userManager.isUserLoggedIn()) {
+      return;
+    }
+    const userId = this.userManager.getCurrentUser()!;
+    if (
+      this._lastMintedGeneration !== this.hydrationGeneration ||
+      this._currentMintUserId !== userId
+    ) {
+      this.mintSession(userId);
+    }
   }
 
   /**
@@ -107,6 +172,7 @@ export default class SyncEngine<T extends BaseStorageMapping> implements ISyncEn
       return;
     }
     this.running = true;
+    this._ensureStartMint();
 
     if (this.resolvedConfig.autoStartSync) {
       this.startSyncInterval();
@@ -134,6 +200,8 @@ export default class SyncEngine<T extends BaseStorageMapping> implements ISyncEn
     Log.verbose('Ganon: SyncEngine.stop');
     this.running = false;
     this.hydrationGeneration += 1;
+    this._currentMintUserId = null;
+    this._lastMintedGeneration = -1;
     // Release the dedupe handle so a later start()/hydrate() runs a fresh pass instead of
     // awaiting the now generation-dead in-flight promise. The orphaned pass still completes
     // internally but its generation guard prevents any write or waiter settlement.
@@ -148,11 +216,10 @@ export default class SyncEngine<T extends BaseStorageMapping> implements ISyncEn
     this.stopSyncInterval();
   }
 
-  private _beginSession(): HydrationSession {
-    return new HydrationSession(
+  private _beginSession(): SessionToken {
+    return this._newSessionToken(
       this.hydrationGeneration,
-      () => this.hydrationGeneration,
-      this.userManager
+      this.userManager.getCurrentUser() ?? null
     );
   }
 
@@ -168,7 +235,7 @@ export default class SyncEngine<T extends BaseStorageMapping> implements ISyncEn
    * Assigns {@link hydrationPromise} before any await so concurrent callers dedupe.
    */
   private _beginHydrationPass(
-    session: HydrationSession,
+    session: SessionToken,
     processKeys: () => Promise<RestoreResult>,
     errorLogMessage: string,
     completionLogMessage: string
@@ -404,7 +471,13 @@ export default class SyncEngine<T extends BaseStorageMapping> implements ISyncEn
       
       this.operationRepo.addOperation(
         key,
-        new SetOperation(key, this.storage, this.firestore, this.metadataManager)
+        new SetOperation(
+          key,
+          this.storage,
+          this.firestore,
+          this.metadataManager,
+          this.captureSessionForOperation()
+        )
       );
     } else {
       Log.info(`Ganon: skipping operation for ${key} - no changes detected (hash: ${currentHash})`);
@@ -436,7 +509,13 @@ export default class SyncEngine<T extends BaseStorageMapping> implements ISyncEn
 
     this.operationRepo.addOperation(
       key,
-      new DeleteOperation(key, this.storage, this.firestore, this.metadataManager)
+      new DeleteOperation(
+        key,
+        this.storage,
+        this.firestore,
+        this.metadataManager,
+        this.captureSessionForOperation()
+      )
     );
   }
 
@@ -574,7 +653,16 @@ export default class SyncEngine<T extends BaseStorageMapping> implements ISyncEn
       if (session.isStale()) {
         return false;
       }
-      const value = await this.firestore.fetch(key);
+      const remoteMeta = this.metadataManager.getRemoteMetaForKey(key);
+      if (remoteMeta?.d === '') {
+        if (session.isStale()) {
+          return false;
+        }
+        await this._applyRemoteDeleteTombstone(key, session, remoteMeta.v);
+        Log.info(`Ganon: restore skipped key ${String(key)} (remote delete tombstone)`);
+        return false;
+      }
+      const value = await this.firestore.fetch(key, { kindHint: remoteMeta?.k });
       if (session.isStale()) {
         return false;
       }
@@ -582,7 +670,6 @@ export default class SyncEngine<T extends BaseStorageMapping> implements ISyncEn
         this.storage.set(key, value as T[Extract<keyof T, string>]);
         // Seed local digests from the restored value (same invariant hydrate maintains).
         const localDigest = computeHash(value);
-        const remoteMeta = this.metadataManager.getRemoteMetaForKey(key);
         await this.metadataManager.recordSyncedState(key, {
           syncStatus: SyncStatus.Synced,
           digest: localDigest,
@@ -647,14 +734,29 @@ export default class SyncEngine<T extends BaseStorageMapping> implements ISyncEn
           if (session.isStale()) {
             return false;
           }
-          const remoteValue = await this.firestore.fetch(key);
+          const localMetadata = this.metadataManager.get(key);
+          const tombstoneCheck = await this._tryApplyRemoteDeleteTombstoneDuringHydrationPass(
+            key,
+            session,
+            localMetadata
+          );
+          if (tombstoneCheck.applied) {
+            Log.info(`✅ Ganon: hydrated key ${key} from remote delete tombstone`);
+            return true;
+          }
+          let remoteMetadata = tombstoneCheck.remoteMetadata;
+          const digestKindHint = this.metadataManager.getRemoteMetaForKey(key)?.k;
+
+          const remoteValue = await this.firestore.fetch(key, { kindHint: digestKindHint });
           if (session.isStale()) {
             return false;
           }
           if (remoteValue !== undefined) {
             const remoteComputedDigest = computeHash(remoteValue);
             // For hydration, we want to get remote metadata without syncing local changes
-            let remoteMetadata = await this.metadataManager.getRemoteMetadataOnly(key);
+            if (!remoteMetadata) {
+              remoteMetadata = await this.metadataManager.getRemoteMetadataOnly(key);
+            }
             if (session.isStale()) {
               return false;
             }
@@ -664,15 +766,15 @@ export default class SyncEngine<T extends BaseStorageMapping> implements ISyncEn
             }
 
             /* C O N F L I C T S */
-            const localMetadata = this.metadataManager.get(key);
+            const localMetadataForConflict = this.metadataManager.get(key);
             const localValue = this.storage.get(key);
 
             // Detect and resolve conflicts before hydration
-            const hasConflict = localMetadata && ConflictResolver.detectConflict<T>(
+            const hasConflict = localMetadataForConflict && ConflictResolver.detectConflict<T>(
               key,
               localValue,
               remoteValue as T[Extract<keyof T, string>] | undefined,
-              localMetadata,
+              localMetadataForConflict,
               remoteMetadata
             );
 
@@ -682,7 +784,7 @@ export default class SyncEngine<T extends BaseStorageMapping> implements ISyncEn
                 key,
                 localValue: this.storage.get(key),
                 remoteValue: remoteValue as T[Extract<keyof T, string>] | undefined,
-                localMetadata,
+                localMetadata: localMetadataForConflict,
                 remoteMetadata,
                 resolutionStrategy: config.strategy,
                 detectedAt: Date.now()
@@ -700,7 +802,7 @@ export default class SyncEngine<T extends BaseStorageMapping> implements ISyncEn
                 await this.metadataManager.recordSyncedState(key, {
                   syncStatus: SyncStatus.Synced,
                   digest: resolvedHash,
-                  version: nextVersion(localMetadata?.version ?? 0, this.clock),
+                  version: nextVersion(localMetadataForConflict?.version ?? 0, this.clock),
                 });
 
                 Log.info(`✅ Ganon: hydrated key ${key} with resolved value (conflict resolved)`);
@@ -839,13 +941,28 @@ export default class SyncEngine<T extends BaseStorageMapping> implements ISyncEn
           return false;
         }
 
-        const remoteValue = await this.firestore.fetch(key);
+        const localMetadata = this.metadataManager.get(key);
+        const tombstoneCheck = await this._tryApplyRemoteDeleteTombstoneDuringHydrationPass(
+          key,
+          session,
+          localMetadata
+        );
+        if (tombstoneCheck.applied) {
+          Log.info(`✅ Ganon: force hydrated key ${key} from remote delete tombstone`);
+          return true;
+        }
+        let remoteMetadata = tombstoneCheck.remoteMetadata;
+        const digestKindHint = this.metadataManager.getRemoteMetaForKey(key)?.k;
+
+        const remoteValue = await this.firestore.fetch(key, { kindHint: digestKindHint });
         if (session.isStale()) {
           return false;
         }
         if (remoteValue !== undefined) {
           const remoteComputedDigest = computeHash(remoteValue);
-          let remoteMetadata = await this.metadataManager.getRemoteMetadataOnly(key);
+          if (!remoteMetadata) {
+            remoteMetadata = await this.metadataManager.getRemoteMetadataOnly(key);
+          }
           if (session.isStale()) {
             return false;
           }
@@ -856,8 +973,7 @@ export default class SyncEngine<T extends BaseStorageMapping> implements ISyncEn
             return true;
           }
 
-          const localMetadata = this.metadataManager.get(key);
-          const hasConflict = localMetadata && remoteMetadata && ConflictResolver.detectConflict<T>(
+          const hasConflict = localMetadata && ConflictResolver.detectConflict<T>(
             key,
             this.storage.get(key),
             remoteValue as T[Extract<keyof T, string>] | undefined,
@@ -866,21 +982,30 @@ export default class SyncEngine<T extends BaseStorageMapping> implements ISyncEn
           );
 
           if (hasConflict) {
+            const config = { ...this._conflictResolutionConfig, ...this._currentConflictConfig };
             const resolution = ConflictResolver.resolveConflict<T>({
               key,
               localValue: this.storage.get(key),
               remoteValue: remoteValue as T[Extract<keyof T, string>] | undefined,
               localMetadata,
               remoteMetadata,
-              resolutionStrategy: this._conflictResolutionConfig.strategy,
+              resolutionStrategy: config.strategy,
               detectedAt: Date.now()
-            }, this._conflictResolutionConfig.strategy, this._conflictResolutionConfig.mergeStrategy);
+            }, config.strategy, config.mergeStrategy);
 
             if (resolution.success) {
               if (session.isStale()) {
                 return false;
               }
               this.storage.set(key, resolution.resolvedValue!);
+              const resolvedHash = computeHash(resolution.resolvedValue!);
+              await this.metadataManager.recordSyncedState(key, {
+                syncStatus: SyncStatus.Synced,
+                digest: resolvedHash,
+                version: nextVersion(localMetadata?.version ?? 0, this.clock),
+              });
+              Log.info(`✅ Ganon: force hydrated key ${key} with resolved value (conflict resolved)`);
+              return true;
             } else {
               Log.warn(`Ganon: Conflict resolution failed for key ${key}, skipping`);
               return false;
@@ -1075,6 +1200,15 @@ export default class SyncEngine<T extends BaseStorageMapping> implements ISyncEn
       this._pendingLastBackupSync = null;
     }
 
+    const inFlight = this.operationRepo.getActiveProcessOperations();
+    if (inFlight) {
+      // Correctness comes from session-fenced I/O, not this wait — only helps fast ops finish cleanly.
+      await Promise.race([
+        inFlight,
+        new Promise<void>((resolve) => setTimeout(resolve, PROCESS_OPERATIONS_FENCE_MS)),
+      ]);
+    }
+
     // Cancel pending metadata sync operations
     this.metadataManager.cancelPendingOperations();
 
@@ -1107,10 +1241,10 @@ export default class SyncEngine<T extends BaseStorageMapping> implements ISyncEn
 
     // Capture identity at schedule time — the write may run after awaits, so the
     // FirestoreManager guard must compare against this, not a capture at call entry.
-    const ownerAtSchedule = this.userManager.getCurrentUser();
+    const sessionAtSchedule = this.captureSessionForOperation();
 
     const write = this.firestore
-      .backupLastBackupToUserDocument(timestamp, { ownerAtSchedule })
+      .backupLastBackupToUserDocument(timestamp, sessionAtSchedule)
       .catch((error) => {
         Log.error(`Ganon: Failed to sync lastBackup to remote: ${error}`);
         // Don't throw - we don't want lastBackup sync failures to break the main sync flow
@@ -1163,6 +1297,48 @@ export default class SyncEngine<T extends BaseStorageMapping> implements ISyncEn
    *   return false;
    * }, "hydrate");
    */
+  private async _applyRemoteDeleteTombstone(
+    key: Extract<keyof T, string>,
+    session: SessionToken,
+    version: number
+  ): Promise<void> {
+    this.storage.remove(key);
+    await this.metadataManager.recordSyncedState(key, {
+      syncStatus: SyncStatus.Synced,
+      digest: '',
+      version,
+    });
+    this.firestore.invalidateSubcollectionReadCache(key, session);
+  }
+
+  /** Shared by hydrate() and forceHydrate() before fetching remote values. */
+  private async _tryApplyRemoteDeleteTombstoneDuringHydrationPass(
+    key: Extract<keyof T, string>,
+    session: SessionToken,
+    localMetadata?: LocalSyncMetadata
+  ): Promise<{ applied: true } | { applied: false; remoteMetadata?: SyncMetadata }> {
+    if (session.isStale()) {
+      return { applied: false };
+    }
+    const remoteMetadata = await this.metadataManager.getRemoteMetadataOnly(key);
+    if (session.isStale()) {
+      return { applied: false };
+    }
+    const localVersion = localMetadata?.version ?? 0;
+    if (
+      remoteMetadata &&
+      remoteMetadata.digest === '' &&
+      remoteMetadata.version > localVersion
+    ) {
+      if (session.isStale()) {
+        return { applied: false };
+      }
+      await this._applyRemoteDeleteTombstone(key, session, remoteMetadata.version);
+      return { applied: true };
+    }
+    return { applied: false, remoteMetadata };
+  }
+
   private async _processKeys(
     processKey: (key: Extract<keyof T, string>) => Promise<boolean>,
     operation: string,
@@ -1270,7 +1446,7 @@ export default class SyncEngine<T extends BaseStorageMapping> implements ISyncEn
     remoteHash: string,
     attempts: number,
     integrityConfig: Partial<IntegrityFailureConfig> | undefined,
-    session: HydrationSession
+    session: SessionToken
   ): Promise<{ success: boolean; recoveryStrategy?: string }> {
     if (session.isStale()) {
       return { success: false, recoveryStrategy: STALE_HYDRATION_RECOVERY_STRATEGY };
@@ -1440,7 +1616,7 @@ export default class SyncEngine<T extends BaseStorageMapping> implements ISyncEn
    */
   private async _forceMetadataRefresh(
     key: Extract<keyof T, string>,
-    session: HydrationSession
+    session: SessionToken
   ): Promise<{ success: boolean; recoveryStrategy: string }> {
     try {
       if (session.isStale()) {
@@ -1456,15 +1632,15 @@ export default class SyncEngine<T extends BaseStorageMapping> implements ISyncEn
         return { success: false, recoveryStrategy: STALE_HYDRATION_RECOVERY_STRATEGY };
       }
 
-      // Force a fresh fetch
-      const remoteValue = await this.firestore.fetch(key);
+      const freshDigest = await this.metadataManager.getRemoteMetadataOnly(key);
+      const remoteValue = await this.firestore.fetch(key, { kindHint: freshDigest?.k });
       if (session.isStale()) {
         return { success: false, recoveryStrategy: STALE_HYDRATION_RECOVERY_STRATEGY };
       }
 
       if (remoteValue !== undefined) {
         const newComputedHash = computeHash(remoteValue);
-        const freshMetadata = await this.metadataManager.getRemoteMetadataOnly(key);
+        const freshMetadata = freshDigest;
 
         if (freshMetadata && freshMetadata.digest === newComputedHash) {
           Log.info(`Ganon: Force metadata refresh successful for key ${key}`);
@@ -1488,7 +1664,7 @@ export default class SyncEngine<T extends BaseStorageMapping> implements ISyncEn
    */
   private async _useLocalData(
     key: Extract<keyof T, string>,
-    session: HydrationSession
+    session: SessionToken
   ): Promise<{ success: boolean; recoveryStrategy: string }> {
     try {
       if (session.isStale()) {
@@ -1544,7 +1720,7 @@ export default class SyncEngine<T extends BaseStorageMapping> implements ISyncEn
    */
   private async _useRemoteDataDespiteIntegrityFailure(
     key: Extract<keyof T, string>,
-    session: HydrationSession
+    session: SessionToken
   ): Promise<{ success: boolean; recoveryStrategy: string }> {
     try {
       if (session.isStale()) {
@@ -1553,7 +1729,8 @@ export default class SyncEngine<T extends BaseStorageMapping> implements ISyncEn
 
       Log.info(`Ganon: Using remote data despite integrity failure for key ${key}`);
 
-      const remoteValue = await this.firestore.fetch(key);
+      const remoteDigest = await this.metadataManager.getRemoteMetadataOnly(key);
+      const remoteValue = await this.firestore.fetch(key, { kindHint: remoteDigest?.k });
       if (session.isStale()) {
         return { success: false, recoveryStrategy: STALE_HYDRATION_RECOVERY_STRATEGY };
       }

@@ -46,9 +46,13 @@ describe('SyncEngine Conflict Handling', () => {
       recordSyncedState: jest.fn().mockResolvedValue(undefined),
       isNeverSynced: jest.fn().mockReturnValue(false),
       get: jest.fn(),
-      updateSyncStatus: jest.fn()
+      updateSyncStatus: jest.fn(),
+      setSessionProvider: jest.fn(),
     } as unknown as jest.Mocked<MetadataManager<any>>;
-    mockOperationRepo = {} as jest.Mocked<OperationRepo<any>>;
+    mockOperationRepo = {
+      configureSession: jest.fn(),
+      getActiveProcessOperations: jest.fn().mockReturnValue(null),
+    } as unknown as jest.Mocked<OperationRepo<any>>;
     mockUserManager = {
       isUserLoggedIn: jest.fn().mockReturnValue(false),
       getCurrentUser: jest.fn().mockReturnValue(undefined)

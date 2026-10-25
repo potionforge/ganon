@@ -38,11 +38,14 @@ describe('Restore integration (step 5)', () => {
       recordLocalChange: jest.fn(),
       updateSyncStatus: jest.fn(),
       isNeverSynced: jest.fn().mockReturnValue(false),
+      setSessionProvider: jest.fn(),
     };
     const mockOperationRepo = {
       addOperation: jest.fn(),
       processOperations: jest.fn().mockResolvedValue([]),
       hasPendingOperations: jest.fn().mockReturnValue(false),
+      configureSession: jest.fn(),
+      getActiveProcessOperations: jest.fn().mockReturnValue(null),
     };
     const mockUserManager = {
       isUserLoggedIn: jest.fn().mockReturnValue(true),
@@ -91,6 +94,7 @@ describe('Restore integration (step 5)', () => {
       recordSyncedState: jest.fn(),
       get: jest.fn(),
       isNeverSynced: jest.fn(),
+      setSessionProvider: jest.fn(),
     };
 
     const config: GanonConfig<RestoreTestStorage> = {
@@ -103,7 +107,12 @@ describe('Restore integration (step 5)', () => {
       { get: jest.fn(), set: jest.fn(), remove: jest.fn(), contains: jest.fn(), clearAllData: jest.fn() } as any,
       { fetch: jest.fn().mockResolvedValue('value'), cloudConfig: {} } as any,
       metadataManager as any,
-      { addOperation: jest.fn(), processOperations: jest.fn().mockResolvedValue([]) } as any,
+      {
+        addOperation: jest.fn(),
+        processOperations: jest.fn().mockResolvedValue([]),
+        configureSession: jest.fn(),
+        getActiveProcessOperations: jest.fn().mockReturnValue(null),
+      } as any,
       { isUserLoggedIn: () => true, getCurrentUser: () => 'u1' } as any,
       config
     );

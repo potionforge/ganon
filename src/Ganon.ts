@@ -429,6 +429,11 @@ export default class Ganon<T extends Record<string, any> & BaseStorageMapping> i
 
     Log.info('Ganon: Clearing all data from local storage');
     try {
+      if (this._isHydrationPending()) {
+        this._settleHydrationWaiters('logged-out');
+      }
+      this.syncEngine.bumpSessionLoggedOut();
+      this.syncEngine.clearAllDataCompanionSync();
       this.storageManager.clearAllData();
     } catch (error) {
       Log.error(`Ganon: Failed to clear local data: ${error}`);
@@ -487,6 +492,7 @@ export default class Ganon<T extends Record<string, any> & BaseStorageMapping> i
       this._loginCycleInProgress = true;
       // Set identifier locally to mark user as logged in
       this.storageManager.set(identifierKey, userId as unknown as T[Extract<keyof T, string>]);
+      this.syncEngine.mintSession(userId);
 
       // Indeterminate must NOT choose backup — that arm runs syncAll with writes.
       const probe = await this.syncEngine.probeRemoteData();

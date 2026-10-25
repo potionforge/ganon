@@ -50,7 +50,7 @@ describe('FakeFirestore forwarding through production adapter', () => {
     const fake = new FakeFirestore();
     const adapter = new FirestoreAdapter(createTestConfig(), fake.module);
     const refManager = new FirestoreReferenceManager(
-      { getCurrentUser: () => 'alice' },
+      { getCurrentUser: () => 'alice', isUserLoggedIn: () => true },
       createTestConfig().cloudConfig,
       fake.module
     );

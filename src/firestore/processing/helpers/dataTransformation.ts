@@ -55,17 +55,9 @@ export const sanitizeForFirestore = (data: any, depth: number = 0, maxDepth: num
       // Sanitize field name if needed
       const sanitizedKey = sanitizeFieldName(stringKey);
       const sanitizedValue = sanitizeForFirestore(value, depth + 1, maxDepth);
-      
-      // Only include the field if it has valid content after sanitization
+
       if (sanitizedValue !== undefined) {
-        if (sanitizedValue && typeof sanitizedValue === 'object' && !Array.isArray(sanitizedValue)) {
-          // For nested objects, only include if they have valid content
-          if (Object.keys(sanitizedValue).length > 0) {
-            result[sanitizedKey] = sanitizedValue;
-          }
-        } else {
-          result[sanitizedKey] = sanitizedValue;
-        }
+        result[sanitizedKey] = sanitizedValue;
       }
     }
 

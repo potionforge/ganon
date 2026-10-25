@@ -6,6 +6,8 @@ import SyncOperationResult from "../../models/sync/SyncOperationResult";
 import { SyncStatus } from "../../models/sync/SyncStatus";
 import Log from "../../utils/Log";
 import MetadataManager from "../../metadata/MetadataManager";
+import SessionToken from "../SessionToken";
+import { nextVersion } from "../../utils/nextVersion";
 
 export default class DeleteOperation<T extends BaseStorageMapping> extends BaseSyncOperation<T> {
   constructor(
@@ -13,25 +15,39 @@ export default class DeleteOperation<T extends BaseStorageMapping> extends BaseS
     storage: StorageManager<T>,
     firestore: FirestoreManager<T>,
     metadataManager: MetadataManager<T>,
+    session: SessionToken,
   ) {
     Log.verbose(`Ganon: DeleteOperation.constructor, key: ${String(key)}`);
-    super(key, storage, firestore, metadataManager);
+    super(key, storage, firestore, metadataManager, session);
   }
 
   async execute(): Promise<SyncOperationResult<T>> {
     Log.verbose(`Ganon: DeleteOperation.execute, key: ${String(this.key)}`);
     try {
+      if (this.session.isStale()) {
+        Log.info(`Ganon: aborted stale sync work (DeleteOperation.start key=${String(this.key)})`);
+        return { success: true, key: this.key, aborted: true };
+      }
+
       // Set status to InProgress when operation starts
       this.metadataManager.updateSyncStatus(this.key, SyncStatus.InProgress);
 
+      const localMetadata = this.metadataManager.get(this.key);
+      const tombstoneVersion = nextVersion(localMetadata?.version ?? 0);
+
       // Step 1: Delete from Firestore
-      await this.firestore.delete(this.key);
+      await this.firestore.delete(this.key, this.session, { version: tombstoneVersion });
+
+      if (this.session.isStale()) {
+        Log.info(`Ganon: aborted stale sync work (DeleteOperation.post-remote key=${String(this.key)})`);
+        return { success: true, key: this.key, aborted: true };
+      }
 
       // Step 2: Remove from local storage and metadata
       this.storage.remove(this.key);
       await this.metadataManager.set(this.key, {
         syncStatus: SyncStatus.Synced,
-        version: Date.now(),
+        version: tombstoneVersion,
         digest: '',
       });
 
@@ -52,6 +68,7 @@ export default class DeleteOperation<T extends BaseStorageMapping> extends BaseS
     return {
       type: 'delete',
       key: this.key,
+      userId: this.session.userId ?? undefined,
       retryCount: this.retryCount,
       maxRetries: this.maxRetries,
     };
@@ -61,12 +78,14 @@ export default class DeleteOperation<T extends BaseStorageMapping> extends BaseS
     storage: StorageManager<T>,
     firestore: FirestoreManager<T>,
     metadataManager: MetadataManager<T>,
+    session: SessionToken,
   }): DeleteOperation<T> {
     const op = new DeleteOperation<T>(
       data.key,
       deps.storage,
       deps.firestore,
-      deps.metadataManager
+      deps.metadataManager,
+      deps.session
     );
     op.retryCount = data.retryCount || 0;
     op.maxRetries = data.maxRetries || 3;

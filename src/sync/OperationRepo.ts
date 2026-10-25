@@ -12,6 +12,7 @@ import DeleteOperation from "./operations/DeleteOperation";
 import StorageManager from "../managers/StorageManager";
 import FirestoreManager from "../firestore/FirestoreManager";
 import MetadataManager from "../metadata/MetadataManager";
+import SessionToken from "./SessionToken";
 
 const PENDING_OPERATIONS_KEY = 'ganon_pending_operations';
 
@@ -22,24 +23,37 @@ interface SerializedOperation {
   key: string;
   retryCount: number;
   maxRetries: number;
+  userId?: string;
 }
 
 interface OperationDependencies<T extends BaseStorageMapping> {
   storage: StorageManager<T>;
   firestore: FirestoreManager<T>;
   metadataManager: MetadataManager<T>;
+  getCurrentUserId: () => string | undefined;
+  getRunSession: () => SessionToken | null;
 }
 
 type OperationClass<T extends BaseStorageMapping> = {
-  new(key: Extract<keyof T, string>, storage: StorageManager<T>, firestore: FirestoreManager<T>, metadataManager: MetadataManager<T>): BaseSyncOperation<T>;
-  deserialize(data: SerializedOperation, deps: OperationDependencies<T>): BaseSyncOperation<T>;
-}
+  new(
+    key: Extract<keyof T, string>,
+    storage: StorageManager<T>,
+    firestore: FirestoreManager<T>,
+    metadataManager: MetadataManager<T>,
+    session: SessionToken
+  ): BaseSyncOperation<T>;
+  deserialize(
+    data: SerializedOperation,
+    deps: OperationDependencies<T> & { session: SessionToken }
+  ): BaseSyncOperation<T>;
+};
 
 export default class OperationRepo<T extends BaseStorageMapping> {
   private _syncInProgress = false;
   private _pendingOperations: Map<Extract<keyof T, string>, ISyncOperation<T>> = new Map();
   private _storage: KeyValueStore;
   private _deps: OperationDependencies<T> | null = null;
+  private _activeProcessOperations: Promise<void> | null = null;
 
   constructor(
     private networkMonitor: NetworkMonitor,
@@ -51,6 +65,17 @@ export default class OperationRepo<T extends BaseStorageMapping> {
       this._deps = deps;
       this._loadPendingOperations();
     }
+  }
+
+  configureSession(deps: Pick<OperationDependencies<T>, 'getCurrentUserId' | 'getRunSession'>) {
+    if (!this._deps) {
+      throw new Error('Ganon: configureSession requires setDependencies first');
+    }
+    this._deps = { ...this._deps, ...deps };
+  }
+
+  getActiveProcessOperations(): Promise<void> | null {
+    return this._activeProcessOperations;
   }
 
   private _getOperationClass(type: OperationType): OperationClass<T> {
@@ -76,7 +101,6 @@ export default class OperationRepo<T extends BaseStorageMapping> {
         const operations = JSON.parse(stored) as SerializedOperation[];
         operations.forEach(opData => {
           try {
-            // Validate operation data
             if (!opData.type || !['set', 'delete'].includes(opData.type)) {
               Log.error(`Ganon: Invalid operation type: ${opData.type}`);
               return;
@@ -89,9 +113,14 @@ export default class OperationRepo<T extends BaseStorageMapping> {
               Log.error(`Ganon: Invalid retryCount in operation data for key ${opData.key}`);
               return;
             }
+            if (!opData.userId) {
+              Log.info(`Ganon: dropping persisted op for key ${opData.key} — missing userId`);
+              return;
+            }
+            const session = SessionToken.persistedPlaceholder(opData.userId);
 
             const OperationClass = this._getOperationClass(opData.type);
-            const operation = OperationClass.deserialize(opData, this._deps!);
+            const operation = OperationClass.deserialize(opData, { ...this._deps!, session });
             this._pendingOperations.set(opData.key as Extract<keyof T, string>, operation);
             Log.verbose(`Ganon: Restored ${opData.type} operation for key: ${opData.key}`);
           } catch (error) {
@@ -159,8 +188,52 @@ export default class OperationRepo<T extends BaseStorageMapping> {
       return [];
     }
 
+    const currentUser = this._deps?.getCurrentUserId();
+    if (!currentUser) {
+      Log.verbose("Ganon: skipping sync because no user is logged in");
+      return [];
+    }
+
+    const runSession = this._deps!.getRunSession();
+    if (!runSession) {
+      Log.verbose("Ganon: skipping sync because no run session is available");
+      return [];
+    }
+
+    const runPromise = this._processOperationsBody(runSession);
+    this._activeProcessOperations = runPromise.then(() => undefined);
+    try {
+      return await runPromise;
+    } finally {
+      this._activeProcessOperations = null;
+    }
+  }
+
+  /**
+   * Refreshes session tokens for ops belonging to the current user before a sync pass.
+   * Ops queued for another user are not restamped: they run once, abort under I11, and are
+   * removed — never deferred. Deferral would re-execute after A returns using `storage.get(key)`
+   * at execution time, but A's local storage was cleared at teardown, so a deferred op would
+   * push B's (or empty) values under A's account.
+   */
+  private _restampQueuedOperations(runSession: SessionToken): void {
+    for (const operation of this._pendingOperations.values()) {
+      if (
+        operation instanceof BaseSyncOperation &&
+        operation.session.userId === runSession.userId
+      ) {
+        operation.session = runSession;
+      }
+    }
+  }
+
+  private async _processOperationsBody(
+    runSession: SessionToken
+  ): Promise<SyncOperationResult<T>[]> {
     this._syncInProgress = true;
     const results: SyncOperationResult<T>[] = [];
+
+    this._restampQueuedOperations(runSession);
 
     try {
       const operationEntries = Array.from(this._pendingOperations.entries());
@@ -174,43 +247,60 @@ export default class OperationRepo<T extends BaseStorageMapping> {
         const batch = operationEntries.slice(i, i + BATCH_SIZE);
         const batchPromises = batch.map(async ([key, operation]) => {
           try {
-            // Check retry count before executing
             if (operation.getRetryCount() >= operation.getMaxRetries()) {
               Log.verbose(`Ganon: operation ${key} has reached max retries, removing from queue`);
-              this._pendingOperations.delete(key);
+              if (!runSession.isStale()) {
+                this._pendingOperations.delete(key);
+              }
               return {
                 success: false,
                 key,
                 error: new Error('Operation exceeded max retries'),
-                shouldRetry: false
+                shouldRetry: false,
               };
             }
 
             const result = await operation.execute();
 
+            if (runSession.isStale()) {
+              if (result.aborted) {
+                this._pendingOperations.delete(key);
+              }
+              return result;
+            }
+
             if (result.success) {
-              // Reset retry count on success and remove from queue
               operation.resetRetryCount();
               this._pendingOperations.delete(key);
             } else if (result.shouldRetry) {
-              // Increment retry count and check if we should continue retrying
               const canRetry = operation.incrementRetryCount();
               if (!canRetry) {
                 Log.verbose(`Ganon: operation ${key} exceeded max retries, removing from queue`);
                 this._pendingOperations.delete(key);
               } else {
-                Log.verbose(`Ganon: operation ${key} failed, will retry (attempt ${operation.getRetryCount()}/${operation.getMaxRetries()})`);
+                Log.verbose(
+                  `Ganon: operation ${key} failed, will retry (attempt ${operation.getRetryCount()}/${operation.getMaxRetries()})`
+                );
               }
             } else {
-              // Operation failed and shouldn't be retried
               this._pendingOperations.delete(key);
             }
 
             return result;
           } catch (error) {
             const errorObj = error instanceof Error ? error : new Error(String(error));
-            const canRetry = operation.incrementRetryCount();
 
+            if (runSession.isStale()) {
+              return {
+                success: false,
+                key,
+                error: errorObj,
+                shouldRetry: false,
+                aborted: true,
+              };
+            }
+
+            const canRetry = operation.incrementRetryCount();
             const result = {
               success: false,
               key,
@@ -222,7 +312,9 @@ export default class OperationRepo<T extends BaseStorageMapping> {
               Log.verbose(`Ganon: operation ${key} exceeded max retries due to exception, removing from queue`);
               this._pendingOperations.delete(key);
             } else {
-              Log.verbose(`Ganon: operation ${key} failed with exception, will retry (attempt ${operation.getRetryCount()}/${operation.getMaxRetries()})`);
+              Log.verbose(
+                `Ganon: operation ${key} failed with exception, will retry (attempt ${operation.getRetryCount()}/${operation.getMaxRetries()})`
+              );
             }
 
             return result;
@@ -234,26 +326,23 @@ export default class OperationRepo<T extends BaseStorageMapping> {
           const [key] = batch[index];
           if (result.status === "fulfilled") {
             results.push(result.value as SyncOperationResult<T>);
-          } else {
-            const errorObj = result.reason instanceof Error ? result.reason : new Error(String(result.reason));
-            const failedResult = {
+          } else if (!runSession.isStale()) {
+            const errorObj =
+              result.reason instanceof Error ? result.reason : new Error(String(result.reason));
+            results.push({
               success: false,
               key,
               error: errorObj,
               shouldRetry: true,
-            };
-            results.push(failedResult);
-
-            // Don't remove failed operations that should be retried
-            if (!failedResult.shouldRetry) {
-              this._pendingOperations.delete(key);
-            }
+            });
           }
         });
       }
     } finally {
       this._syncInProgress = false;
-      this._savePendingOperations();
+      if (runSession && !runSession.isStale()) {
+        this._savePendingOperations();
+      }
     }
 
     return results;

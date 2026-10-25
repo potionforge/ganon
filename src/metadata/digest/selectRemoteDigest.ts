@@ -5,6 +5,7 @@ export type DigestReadMode = 'legacy' | 'dual' | 'v2';
 export interface DigestEntry {
   d: string;
   v: number;
+  k?: 'array' | 'object';
 }
 
 /**

@@ -9,6 +9,8 @@ import MetadataCoordinatorRepo from "./MetadataCoordinatorRepo";
 import MetadataCoordinator from "./remote/MetadataCoordinator";
 import Log from "../utils/Log";
 import KeyRouter from "../routing/KeyRouter";
+import SessionToken from "../sync/SessionToken";
+import { RemoteDigestEntry } from "../models/sync/RemoteDigestEntry";
 
 export default class MetadataManager<T extends BaseStorageMapping> {
   constructor(
@@ -21,7 +23,7 @@ export default class MetadataManager<T extends BaseStorageMapping> {
   }
 
   private keyRouter: KeyRouter<T>;
-  private lastRemoteSnapshot: Record<string, { d: string; v: number }> = {};
+  private lastRemoteSnapshot: Record<string, RemoteDigestEntry> = {};
 
   get(key: Extract<keyof T, string>): LocalSyncMetadata | undefined {
     return this.metadataStore.get(key);
@@ -56,7 +58,25 @@ export default class MetadataManager<T extends BaseStorageMapping> {
     coordinator.updateSyncStatus(key, status);
   }
 
-  async hydrateMetadata(session: { isStale(): boolean }): Promise<void> {
+  private sessionProvider?: () => SessionToken;
+
+  setSessionProvider(provider: () => SessionToken): void {
+    this.sessionProvider = provider;
+    this.coordinatorRepo.setSessionProvider(provider);
+  }
+
+  getOperationSession(): SessionToken {
+    if (!this.sessionProvider) {
+      throw new Error('Ganon: session provider not configured on MetadataManager');
+    }
+    return this.sessionProvider();
+  }
+
+  clearLocalMetadataSync(): void {
+    this.metadataStore.clear();
+  }
+
+  async hydrateMetadata(session: { isStale(): boolean; isCurrentGeneration?(): boolean }): Promise<void> {
     Log.info('Ganon: MetadataManager.hydrateMetadata');
     if (!this.config?.cloudConfig) return;
 
@@ -105,7 +125,7 @@ export default class MetadataManager<T extends BaseStorageMapping> {
   }
 
   /** Remote metadata from the most recent hydrateMetadata() pass — no additional fetch. */
-  getRemoteMetaForKey(key: Extract<keyof T, string>): { d: string; v: number } | undefined {
+  getRemoteMetaForKey(key: Extract<keyof T, string>): RemoteDigestEntry | undefined {
     return this.lastRemoteSnapshot[String(key)];
   }
 
@@ -189,13 +209,14 @@ export default class MetadataManager<T extends BaseStorageMapping> {
     }
 
     // Get remote metadata without syncing local changes
-    const remoteMetadata = await coordinator.getRemoteMetadata([key]);
-    const remoteMeta = remoteMetadata[key];
+    await coordinator.getRemoteMetadata([key]);
+    const remoteMeta = coordinator.getRemoteEntryForConfigKey(String(key));
 
     if (remoteMeta) {
       return {
         digest: remoteMeta.d,
-        version: remoteMeta.v
+        version: remoteMeta.v,
+        k: remoteMeta.k,
       };
     }
 

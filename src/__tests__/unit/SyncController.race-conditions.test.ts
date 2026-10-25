@@ -76,7 +76,8 @@ describe('SyncEngine - Race Conditions', () => {
       needsHydration: jest.fn(),
       ensureConsistency: jest.fn(),
       invalidateCache: jest.fn(),
-      cancelPendingOperations: jest.fn()
+      cancelPendingOperations: jest.fn(),
+      setSessionProvider: jest.fn(),
     } as any;
     mockMetadataManager.isNeverSynced = jest.fn((key: string) => {
       const meta = mockMetadataManager.get(key as keyof TestStorage);
@@ -93,7 +94,9 @@ describe('SyncEngine - Race Conditions', () => {
       addOperation: jest.fn(),
       removeOperation: jest.fn(),
       processOperations: jest.fn(),
-      clearAll: jest.fn()
+      clearAll: jest.fn(),
+      configureSession: jest.fn(),
+      getActiveProcessOperations: jest.fn().mockReturnValue(null),
     } as any;
 
     mockNetworkMonitor = {

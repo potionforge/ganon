@@ -5,6 +5,9 @@ import { FirebaseFirestoreTypes } from '@react-native-firebase/firestore';
 import { GanonConfig } from '../../models/config/GanonConfig';
 import { BaseStorageMapping } from '../../models/storage/BaseStorageMapping';
 import SyncError, { SyncErrorType } from '../../errors/SyncError';
+import SessionToken from '../../sync/SessionToken';
+
+const chunkSession = SessionToken.forTests('test-user');
 
 // Create a test storage mapping
 interface TestStorageMapping extends BaseStorageMapping {
@@ -163,7 +166,7 @@ describe('ChunkManager', () => {
       mockQuerySnapshot.empty = true;
       mockQuerySnapshot.docs = [];
 
-      await chunkManager.writeData(mockCollectionRef, 'test', smallData);
+      await chunkManager.writeData(mockCollectionRef, 'test', smallData, { session: chunkSession });
 
       expect(mockAdapter.setDocument).toHaveBeenCalledWith(
         expect.objectContaining({ id: 'chunk_0' }),
@@ -183,7 +186,7 @@ describe('ChunkManager', () => {
       // Force areChunksEqual to always return false so update is triggered
       (chunkManager as any).areChunksEqual = jest.fn(() => false);
 
-      await chunkManager.writeData(mockCollectionRef, 'test', smallData);
+      await chunkManager.writeData(mockCollectionRef, 'test', smallData, { session: chunkSession });
 
       expect(mockAdapter.setDocument).toHaveBeenCalledWith(
         expect.objectContaining({ id: 'chunk_0' }),
@@ -196,7 +199,7 @@ describe('ChunkManager', () => {
       const arrayData = ['item1', 'item2', 'item3'];
       mockQuerySnapshot.empty = true;
 
-      await chunkManager.writeData(mockCollectionRef, 'test', arrayData);
+      await chunkManager.writeData(mockCollectionRef, 'test', arrayData, { session: chunkSession });
 
       expect(mockAdapter.setDocument).toHaveBeenCalledWith(
         expect.objectContaining({ id: 'chunk_0' }),
@@ -210,7 +213,7 @@ describe('ChunkManager', () => {
         createMockDocSnapshot('chunk_0', { '0': 'old1', '1': 'old2' })
       ];
 
-      await chunkManager.writeData(mockCollectionRef, 'test', arrayData);
+      await chunkManager.writeData(mockCollectionRef, 'test', arrayData, { session: chunkSession });
 
       expect(mockAdapter.setDocument).toHaveBeenCalledWith(
         expect.objectContaining({ id: 'chunk_0' }),
@@ -226,7 +229,7 @@ describe('ChunkManager', () => {
         createMockDocSnapshot('chunk_2', { oldData3: 'value3' }),
       ];
 
-      await chunkManager.writeData(mockCollectionRef, 'test', smallData);
+      await chunkManager.writeData(mockCollectionRef, 'test', smallData, { session: chunkSession });
 
       // Should use batch to delete extra chunks and replace chunk_0
       expect(mockAdapter.writeBatch).toHaveBeenCalled();
@@ -245,7 +248,7 @@ describe('ChunkManager', () => {
         createMockDocSnapshot('chunk_1', { '1': 'old2' }),
       ];
 
-      await chunkManager.writeData(mockCollectionRef, 'test', arrayData);
+      await chunkManager.writeData(mockCollectionRef, 'test', arrayData, { session: chunkSession });
 
       // Should use batch to delete extra chunks and replace chunk_0
       expect(mockAdapter.writeBatch).toHaveBeenCalled();
@@ -268,7 +271,7 @@ describe('ChunkManager', () => {
         createMockDocSnapshot('chunk_0', { oldKey: 'oldValue' })
       ];
 
-      await chunkManager.writeData(mockCollectionRef, 'test', largeData);
+      await chunkManager.writeData(mockCollectionRef, 'test', largeData, { session: chunkSession });
 
       expect(mockAdapter.writeBatch).toHaveBeenCalled();
       expect(mockBatch.set).toHaveBeenCalled();
@@ -291,7 +294,7 @@ describe('ChunkManager', () => {
 
       mockQuerySnapshot.empty = true;
 
-      await chunkManager.writeData(mockCollectionRef, 'test', manyFieldsData);
+      await chunkManager.writeData(mockCollectionRef, 'test', manyFieldsData, { session: chunkSession });
 
       expect(mockAdapter.writeBatch).toHaveBeenCalled();
       expect(mockBatch.set).toHaveBeenCalled();
@@ -304,9 +307,9 @@ describe('ChunkManager', () => {
         errors: ['Invalid data format']
       });
 
-      await expect(chunkManager.writeData(mockCollectionRef, 'test', { key: 'value' }))
+      await expect(chunkManager.writeData(mockCollectionRef, 'test', { key: 'value' }, { session: chunkSession }))
         .rejects.toThrow(SyncError);
-      await expect(chunkManager.writeData(mockCollectionRef, 'test', { key: 'value' }))
+      await expect(chunkManager.writeData(mockCollectionRef, 'test', { key: 'value' }, { session: chunkSession }))
         .rejects.toMatchObject({
           type: SyncErrorType.SyncValidationError,
         });
@@ -315,9 +318,9 @@ describe('ChunkManager', () => {
     it('should throw SyncError for primitive values that are too large', async () => {
       const largeString = 'x'.repeat(300000);
 
-      await expect(chunkManager.writeData(mockCollectionRef, 'test', largeString))
+      await expect(chunkManager.writeData(mockCollectionRef, 'test', largeString, { session: chunkSession }))
         .rejects.toThrow(SyncError);
-      await expect(chunkManager.writeData(mockCollectionRef, 'test', largeString))
+      await expect(chunkManager.writeData(mockCollectionRef, 'test', largeString, { session: chunkSession }))
         .rejects.toMatchObject({
           type: SyncErrorType.SyncValidationError,
         });
@@ -342,7 +345,7 @@ describe('ChunkManager', () => {
           // field2 is deleted
         };
 
-        await chunkManager.writeData(mockCollectionRef, 'test', newData);
+        await chunkManager.writeData(mockCollectionRef, 'test', newData, { session: chunkSession });
 
         // Should use set without merge to ensure deleted field is removed
         expect(mockAdapter.setDocument).toHaveBeenCalledWith(
@@ -396,7 +399,7 @@ describe('ChunkManager', () => {
           return chunks;
         });
 
-        await chunkManager.writeData(mockCollectionRef, 'test', newData);
+        await chunkManager.writeData(mockCollectionRef, 'test', newData, { session: chunkSession });
 
         // Should use batch to update chunks
         expect(mockAdapter.writeBatch).toHaveBeenCalled();
@@ -455,7 +458,7 @@ describe('ChunkManager', () => {
           // metadata object deleted
         };
 
-        await chunkManager.writeData(mockCollectionRef, 'test', newData);
+        await chunkManager.writeData(mockCollectionRef, 'test', newData, { session: chunkSession });
 
         // Should use set without merge to ensure all deleted fields are removed
         expect(mockAdapter.setDocument).toHaveBeenCalledWith(
@@ -489,7 +492,7 @@ describe('ChunkManager', () => {
           { id: 3, name: 'Item 3' }
         ];
 
-        await chunkManager.writeData(mockCollectionRef, 'test', newData);
+        await chunkManager.writeData(mockCollectionRef, 'test', newData, { session: chunkSession });
 
         // Should use set without merge to ensure deleted fields are removed
         expect(mockAdapter.setDocument).toHaveBeenCalledWith(
@@ -613,7 +616,7 @@ describe('ChunkManager', () => {
       mockAdapter.getCollection.mockResolvedValue({ empty: true, docs: [] } as any);
 
       // Write data
-      await chunkManager.writeData(mockCollectionRef, 'test-data', originalData);
+      await chunkManager.writeData(mockCollectionRef, 'test-data', originalData, { session: chunkSession });
 
       // Setup read mocks - simulate reading back the sanitized data
       const mockDoc = {
@@ -651,7 +654,7 @@ describe('ChunkManager', () => {
       mockAdapter.getCollection.mockResolvedValue({ empty: true, docs: [] } as any);
 
       // Write large dataset (should chunk automatically)
-      await chunkManager.writeData(mockCollectionRef, 'large-dataset', largeDataset);
+      await chunkManager.writeData(mockCollectionRef, 'large-dataset', largeDataset, { session: chunkSession });
 
       // Verify chunking occurred
       const chunkCalls = (mockCollectionRef.doc as jest.Mock).mock.calls
@@ -698,7 +701,7 @@ describe('ChunkManager', () => {
 
       // Write data (should chunk if needed, but we force chunking for test)
       (chunkManager as any).calculateDataSize = jest.fn(() => 100_001); // Force chunking
-      await chunkManager.writeData(mockCollectionRef, 'numeric-keys', originalData);
+      await chunkManager.writeData(mockCollectionRef, 'numeric-keys', originalData, { session: chunkSession });
 
       // Simulate reading back chunked docs
       const chunkDocs = [
@@ -743,7 +746,7 @@ describe('ChunkManager', () => {
         ...changedChunk
       };
 
-      await chunkManager.writeData(mockCollectionRef, 'large-hash-test', newData);
+      await chunkManager.writeData(mockCollectionRef, 'large-hash-test', newData, { session: chunkSession });
 
       expect(mockAdapter.writeBatch).toHaveBeenCalled();
       expect(mockBatch.commit).toHaveBeenCalled();
@@ -775,7 +778,7 @@ describe('ChunkManager', () => {
       });
 
       try {
-        await chunkManager.writeData(mockCollectionRef, 'circular-test', circularData);
+        await chunkManager.writeData(mockCollectionRef, 'circular-test', circularData, { session: chunkSession });
 
         // Should still work due to fallback
         expect(mockAdapter.setDocument).toHaveBeenCalled();
@@ -801,7 +804,7 @@ describe('ChunkManager', () => {
         createMockDocSnapshot('chunk_2', { obsoleteKey: 'obsolete_data' }), // Will be deleted
       ];
 
-      await chunkManager.writeData(mockCollectionRef, 'metrics-test', largeData);
+      await chunkManager.writeData(mockCollectionRef, 'metrics-test', largeData, { session: chunkSession });
 
       // Verify that Log.info was called (it should be mocked in the jest.mock at the top)
       expect(Log.info).toBeDefined();
@@ -829,7 +832,7 @@ describe('ChunkManager', () => {
       mockDataProcessor.validateForFirestore.mockReturnValue({ isValid: true, errors: [] });
       mockAdapter.getCollection.mockRejectedValue(new Error('Unknown error'));
 
-      await expect(chunkManager.writeData(mockCollectionRef, 'test-key', testData))
+      await expect(chunkManager.writeData(mockCollectionRef, 'test-key', testData, { session: chunkSession }))
         .rejects.toThrow(SyncError);
     });
 
@@ -841,7 +844,7 @@ describe('ChunkManager', () => {
       mockDataProcessor.validateForFirestore.mockReturnValue({ isValid: true, errors: [] });
       mockAdapter.getCollection.mockRejectedValue(syncError);
 
-      await expect(chunkManager.writeData(mockCollectionRef, 'test-key', testData))
+      await expect(chunkManager.writeData(mockCollectionRef, 'test-key', testData, { session: chunkSession }))
         .rejects.toBe(syncError);
     });
 

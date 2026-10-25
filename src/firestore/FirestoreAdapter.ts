@@ -8,11 +8,16 @@ import {
   writeBatch,
   runTransaction,
   getFirestore,
+  deleteField,
 } from '@react-native-firebase/firestore';
 import Log from '../utils/Log';
 import IFirestoreAdapter from '../models/interfaces/IFirestoreAdapter';
 import { GanonConfig } from '../models/config/GanonConfig';
 import { BaseStorageMapping } from '../models/storage/BaseStorageMapping';
+import {
+  createFieldDeleteMarker,
+  isFieldDeleteMarker,
+} from './fieldDeleteMarker';
 
 class FirestoreAdapter<T extends BaseStorageMapping> implements IFirestoreAdapter {
   private firestore: FirebaseFirestoreTypes.Module;
@@ -21,6 +26,24 @@ class FirestoreAdapter<T extends BaseStorageMapping> implements IFirestoreAdapte
   constructor(readonly config: GanonConfig<T>, firestore?: FirebaseFirestoreTypes.Module) {
     this.firestore = firestore ?? getFirestore();
     this._remoteReadonly = config.remoteReadonly ?? false;
+  }
+
+  fieldDelete(): unknown {
+    return createFieldDeleteMarker();
+  }
+
+  private translateFieldDeletes(data: unknown): unknown {
+    if (isFieldDeleteMarker(data)) {
+      return deleteField();
+    }
+    if (data === null || typeof data !== 'object' || Array.isArray(data)) {
+      return data;
+    }
+    const out: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(data as Record<string, unknown>)) {
+      out[key] = this.translateFieldDeletes(value);
+    }
+    return out;
   }
 
   /**
@@ -62,6 +85,11 @@ class FirestoreAdapter<T extends BaseStorageMapping> implements IFirestoreAdapte
         continue;
       }
 
+      if (isFieldDeleteMarker(value)) {
+        validatedData[stringKey] = value;
+        continue;
+      }
+
       // Skip undefined values (null is allowed)
       if (value === undefined) {
         Log.warn(`🔥 ${operationName}: Skipping undefined value for key "${stringKey}"`);
@@ -74,42 +102,19 @@ class FirestoreAdapter<T extends BaseStorageMapping> implements IFirestoreAdapte
         continue;
       }
 
-      // 🆕 RECURSIVE VALIDATION FOR NESTED OBJECTS
       if (value !== null && typeof value === 'object' && !Array.isArray(value)) {
-        const nestedValidated = this.validateAndSanitizeData(value, `${operationName}.${stringKey}`);
-        // Only include nested object if it has valid content and is not just {_empty: true}
-        const keys = Object.keys(nestedValidated);
-        if (keys.length > 0 && !(keys.length === 1 && nestedValidated._empty)) {
-          validatedData[stringKey] = nestedValidated;
-        } else {
-          Log.warn(`🔥 ${operationName}: Skipping empty nested object for key "${stringKey}"`);
-        }
+        validatedData[stringKey] = this.validateAndSanitizeData(value, `${operationName}.${stringKey}`);
         continue;
       }
 
-      // 🆕 HANDLE ARRAYS WITH NESTED VALIDATION
       if (Array.isArray(value)) {
         const validatedArray = value
-          .filter(item => item !== undefined) // Remove undefined items
+          .filter(item => item !== undefined)
           .map((item, index) => {
             if (item !== null && typeof item === 'object' && !Array.isArray(item)) {
-              const validated = this.validateAndSanitizeData(item, `${operationName}.${stringKey}[${index}]`);
-              const keys = Object.keys(validated);
-              if (keys.length === 0 || (keys.length === 1 && validated._empty)) {
-                return undefined;
-              }
-              return validated;
+              return this.validateAndSanitizeData(item, `${operationName}.${stringKey}[${index}]`);
             }
             return item;
-          })
-          .filter(item => {
-            if (item === undefined) return false;
-            if (item && typeof item === 'object' && !Array.isArray(item)) {
-              const keys = Object.keys(item);
-              // Remove if empty or only _empty: true
-              return !(keys.length === 0 || (keys.length === 1 && item._empty));
-            }
-            return true;
           });
 
         validatedData[stringKey] = validatedArray;
@@ -117,12 +122,6 @@ class FirestoreAdapter<T extends BaseStorageMapping> implements IFirestoreAdapte
       }
 
       validatedData[stringKey] = value;
-    }
-
-    // Ensure we have at least one valid field
-    if (Object.keys(validatedData).length === 0) {
-      Log.warn(`🔥 ${operationName}: No valid data fields, using empty object`);
-      validatedData._empty = true;
     }
 
     Log.verbose(`🔥 ${operationName}: Validated data has ${Object.keys(validatedData).length} fields`);
@@ -160,13 +159,14 @@ class FirestoreAdapter<T extends BaseStorageMapping> implements IFirestoreAdapte
 
     try {
       const validatedData = this.validateAndSanitizeData(data, 'setDocument');
+      const payload = this.translateFieldDeletes(validatedData) as Record<string, unknown>;
 
       if (options) {
-        const result = await setDoc(ref, validatedData, options);
+        const result = await setDoc(ref, payload, options);
         Log.verbose(`🔥 setDoc completed with options, result: ${result}`);
         return result;
       } else {
-        const result = await setDoc(ref, validatedData);
+        const result = await setDoc(ref, payload);
         Log.verbose(`🔥 setDoc completed without options, result: ${result}`);
         return result;
       }
@@ -199,11 +199,12 @@ class FirestoreAdapter<T extends BaseStorageMapping> implements IFirestoreAdapte
 
     try {
       const validatedData = this.validateAndSanitizeData(data, 'setDocumentWithTransaction');
+      const payload = this.translateFieldDeletes(validatedData) as Record<string, unknown>;
 
       if (options) {
-        transaction.set(ref, validatedData, options);
+        transaction.set(ref, payload, options);
       } else {
-        transaction.set(ref, validatedData);
+        transaction.set(ref, payload);
       }
     } catch (error) {
       Log.error(`🔥 setDocumentWithTransaction failed: ${error}`);

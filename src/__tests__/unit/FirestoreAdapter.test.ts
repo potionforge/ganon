@@ -391,7 +391,7 @@ describe('FirestoreAdapter', () => {
       });
     });
 
-    it('should return empty object with _empty flag when no valid fields', () => {
+    it('should return empty object when no valid fields remain after filtering', () => {
       const data = {
         '': 'value3',
         func: () => {},
@@ -399,7 +399,13 @@ describe('FirestoreAdapter', () => {
         undef: undefined
       };
       const result = (adapter as any).validateAndSanitizeData(data, 'test');
-      expect(result).toEqual({ _empty: true });
+      expect(result).toEqual({});
+    });
+
+    it('should persist intentional nested empty objects', () => {
+      const data = { nested: {}, keep: 'x' };
+      const result = (adapter as any).validateAndSanitizeData(data, 'test');
+      expect(result).toEqual({ nested: {}, keep: 'x' });
     });
 
     // 🆕 NEW TESTS FOR NESTED NIL VALUE HANDLING
@@ -527,7 +533,7 @@ describe('FirestoreAdapter', () => {
       });
     });
 
-    it('should remove empty nested objects after undefined removal', () => {
+    it('should keep nested empty object after undefined-only fields are removed', () => {
       const data = {
         user: {
           profile: {
@@ -542,6 +548,7 @@ describe('FirestoreAdapter', () => {
       const result = (adapter as any).validateAndSanitizeData(data, 'test');
       expect(result).toEqual({
         user: {
+          profile: {},
           settings: {
             theme: 'dark'
           }

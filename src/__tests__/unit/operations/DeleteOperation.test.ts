@@ -10,6 +10,7 @@ import {
   createMockFirestoreManager, 
   createMockMetadataManager 
 } from '../../utils/TestSetupUtils';
+import { testSession } from '../../utils/testSession';
 
 // Mock Log to avoid noise in tests
 jest.mock('../../../utils/Log', () => ({
@@ -54,7 +55,8 @@ describe('DeleteOperation', () => {
       testKey,
       mockStorage,
       mockFirestore,
-      mockMetadataManager
+      mockMetadataManager,
+      testSession
     );
   });
 
@@ -83,7 +85,11 @@ describe('DeleteOperation', () => {
 
       // Verify all stores are cleaned up
       expect(mockStorage.remove).toHaveBeenCalledWith(testKey);
-      expect(mockFirestore.delete).toHaveBeenCalledWith(testKey);
+      expect(mockFirestore.delete).toHaveBeenCalledWith(
+        testKey,
+        testSession,
+        expect.objectContaining({ version: expect.any(Number) })
+      );
     });
 
     it('should handle deletion when key does not exist in some stores', async () => {
@@ -107,7 +113,11 @@ describe('DeleteOperation', () => {
 
       // Verify cleanup attempts
       expect(mockStorage.remove).toHaveBeenCalledWith(testKey);
-      expect(mockFirestore.delete).toHaveBeenCalledWith(testKey);
+      expect(mockFirestore.delete).toHaveBeenCalledWith(
+        testKey,
+        testSession,
+        expect.objectContaining({ version: expect.any(Number) })
+      );
     });
   });
 

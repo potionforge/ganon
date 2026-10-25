@@ -14,6 +14,9 @@ import ChunkManager from "./chunking/ChunkManager";
 import UserManager from "../managers/UserManager";
 import { Scheduler } from "../ports/Scheduler";
 import { DIGEST_MAP_KEY } from "../constants";
+import { SubcollectionPayloadKind } from "../models/sync/RemoteDigestEntry";
+import SessionToken from "../sync/SessionToken";
+import { guardSessionBeforeIo, requireSessionInTransaction, StaleSessionAbort } from "../sync/sessionGuard";
 
 export default class FirestoreManager<T extends BaseStorageMapping> implements ICloudManager<T> {
   private referenceManager: FirestoreReferenceManager<T>;
@@ -23,6 +26,7 @@ export default class FirestoreManager<T extends BaseStorageMapping> implements I
 
   // Transaction concurrency control
   private transactionQueue: Array<{
+    session: SessionToken;
     callback: (transaction: FirebaseFirestoreTypes.Transaction) => Promise<any>;
     resolve: (value: any) => void;
     reject: (error: any) => void;
@@ -89,21 +93,31 @@ export default class FirestoreManager<T extends BaseStorageMapping> implements I
    * @returns Promise that resolves with the result of the transaction
    * @throws {SyncError} Throws error if transaction fails
    */
-  async runTransaction<R>(callback: (transaction: FirebaseFirestoreTypes.Transaction) => Promise<R>): Promise<R> {
+  async runTransaction<R>(
+    session: SessionToken,
+    callback: (transaction: FirebaseFirestoreTypes.Transaction) => Promise<R>
+  ): Promise<R | undefined> {
     Log.verbose('Ganon: FirestoreManager.runTransaction');
 
-    if (!this.userManager.isUserLoggedIn()) {
+    if (session.isStale()) {
+      Log.info('Ganon: aborted stale sync work (runTransaction.enqueue)');
+      return undefined;
+    }
+
+    return new Promise<R | undefined>((resolve, reject) => {
+      this.transactionQueue.push({ session, callback, resolve, reject });
+      this.processTransactionQueue();
+    });
+  }
+
+  private _requireSessionUserId(session: SessionToken): string {
+    if (!session.userId) {
       throw new SyncError(
-        'Cannot perform transaction: no user is logged in',
+        'Cannot perform operation: session has no userId',
         SyncErrorType.SyncConfigurationError
       );
     }
-
-    // Queue transaction to prevent concurrent execution
-    return new Promise<R>((resolve, reject) => {
-      this.transactionQueue.push({ callback, resolve, reject });
-      this.processTransactionQueue();
-    });
+    return session.userId;
   }
 
   /**
@@ -115,7 +129,14 @@ export default class FirestoreManager<T extends BaseStorageMapping> implements I
     }
 
     this.activeTransactions++;
-    const { callback, resolve, reject } = this.transactionQueue.shift()!;
+    const { session, callback, resolve, reject } = this.transactionQueue.shift()!;
+
+    if (!guardSessionBeforeIo(session, 'processTransactionQueue.before-adapter-runTransaction')) {
+      resolve(undefined);
+      this.activeTransactions--;
+      this.processTransactionQueue();
+      return;
+    }
 
     // Add timeout protection
     let timeoutId: NodeJS.Timeout | undefined;
@@ -135,6 +156,12 @@ export default class FirestoreManager<T extends BaseStorageMapping> implements I
     } catch (error) {
       // Clear timeout since transaction failed
       if (timeoutId) clearTimeout(timeoutId);
+
+      if (error instanceof StaleSessionAbort) {
+        Log.info(`Ganon: aborted stale sync work (${error.site})`);
+        resolve(undefined);
+        return;
+      }
 
       Log.error(`Ganon FirestoreManager: Transaction failed: ${error}`);
 
@@ -210,9 +237,10 @@ export default class FirestoreManager<T extends BaseStorageMapping> implements I
     value: any,
     digest: string,
     version: number,
-    transaction: FirebaseFirestoreTypes.Transaction
+    transaction: FirebaseFirestoreTypes.Transaction,
+    session: SessionToken
   ): Promise<void> {
-    await this.backup(key, value, { transaction, digest, version });
+    await this.backup(key, value, { transaction, digest, version, session });
   }
 
   /** Runs a transaction that atomically writes value + in-document digest for docKeys. */
@@ -220,10 +248,11 @@ export default class FirestoreManager<T extends BaseStorageMapping> implements I
     key: Extract<keyof T, string>,
     value: any,
     digest: string,
-    version: number
+    version: number,
+    session: SessionToken
   ): Promise<void> {
-    await this.runTransaction(async (transaction) => {
-      await this.writeValueWithDigest(key, value, digest, version, transaction);
+    await this.runTransaction(session, async (transaction) => {
+      await this.writeValueWithDigest(key, value, digest, version, transaction, session);
     });
   }
 
@@ -241,16 +270,16 @@ export default class FirestoreManager<T extends BaseStorageMapping> implements I
     options: {
       digest: string;
       version: number;
+      session: SessionToken;
       transaction?: FirebaseFirestoreTypes.Transaction;
     }
   ): Promise<void> {
     Log.verbose(`Ganon: FirestoreManager.backup, key: ${String(key)}`);
 
-    if (!this.userManager.isUserLoggedIn()) {
-      throw new SyncError(
-        'Cannot perform backup operation: no user is logged in',
-        SyncErrorType.SyncConfigurationError
-      );
+    const session = options.session;
+    if (session.isStale()) {
+      Log.info(`Ganon: aborted stale sync work (backup.start key=${String(key)})`);
+      return;
     }
 
     if (!key || key === '') {
@@ -263,7 +292,7 @@ export default class FirestoreManager<T extends BaseStorageMapping> implements I
     // If value is undefined, treat it as a deletion
     if (value === undefined) {
       Log.info(`Ganon: value for key ${String(key)} is undefined, treating as deletion`);
-      await this.delete(key);
+      await this.delete(key, session, { version: options.version });
       return;
     }
 
@@ -277,18 +306,37 @@ export default class FirestoreManager<T extends BaseStorageMapping> implements I
         // Continue anyway - let Firestore handle the errors
       }
 
-      const { ref, type } = this.referenceManager.getRefForKey(key);
+      const { ref, type } = this.referenceManager.getRefForKeyForUser(
+        key,
+        this._requireSessionUserId(session)
+      );
       accessType = type;
       accessPath = ref.path;
 
       if (type === DocumentOrCollection.Document) {
         Log.verbose(`Ganon: FirestoreManager.backup, key: ${String(key)}, type: ${type}`);
-        await this._backupDocumentField(ref as FirebaseFirestoreTypes.DocumentReference, key, value, options);
+        await this._backupDocumentField(
+          ref as FirebaseFirestoreTypes.DocumentReference,
+          key,
+          value,
+          session,
+          options
+        );
       } else {
         Log.verbose(`Ganon: FirestoreManager.backup, key: ${String(key)}, type: ${type}`);
-        await this._backupSubcollection(ref as FirebaseFirestoreTypes.CollectionReference, key, value, options);
+        await this._backupSubcollection(
+          ref as FirebaseFirestoreTypes.CollectionReference,
+          key,
+          value,
+          session,
+          options
+        );
       }
     } catch (error) {
+      if (error instanceof StaleSessionAbort) {
+        throw error;
+      }
+
       Log.error(`Ganon FirestoreManager: Backup failed for key ${String(key)}: ${error}`);
 
       if (error instanceof SyncError) {
@@ -380,7 +428,20 @@ export default class FirestoreManager<T extends BaseStorageMapping> implements I
    * @returns Promise that resolves with the fetched value, or undefined if not found
    * @throws {SyncError} Throws error if fetch fails
    */
-  async fetch(key: Extract<keyof T, string>): Promise<T[keyof T] | undefined> {
+  invalidateSubcollectionReadCache(key: Extract<keyof T, string>, session: SessionToken): void {
+    const { ref, type } = this.referenceManager.getRefForKeyForUser(
+      key,
+      this._requireSessionUserId(session)
+    );
+    if (type === DocumentOrCollection.Collection) {
+      this.chunkManager.invalidateReadCache(ref as FirebaseFirestoreTypes.CollectionReference);
+    }
+  }
+
+  async fetch(
+    key: Extract<keyof T, string>,
+    options?: { kindHint?: SubcollectionPayloadKind }
+  ): Promise<T[keyof T] | undefined> {
     Log.verbose(`Ganon: FirestoreManager.fetch, key: ${String(key)}`);
 
     if (!this.userManager.isUserLoggedIn()) {
@@ -435,7 +496,9 @@ export default class FirestoreManager<T extends BaseStorageMapping> implements I
       } else {
         // For subcollections, use ChunkManager to handle both chunked and non-chunked data
         const collectionRef = ref as FirebaseFirestoreTypes.CollectionReference;
-        const value = await this.chunkManager.readData(collectionRef);
+        const value = await this.chunkManager.readData(collectionRef, {
+          kindHint: options?.kindHint,
+        });
 
         if (value === undefined) {
           return undefined;
@@ -527,58 +590,75 @@ export default class FirestoreManager<T extends BaseStorageMapping> implements I
    * @returns Promise that resolves when the deletion is complete
    * @throws {SyncError} Throws error if delete fails
    */
-  async delete(key: Extract<keyof T, string>): Promise<void> {
+  async delete(
+    key: Extract<keyof T, string>,
+    session: SessionToken,
+    options: { version: number }
+  ): Promise<void> {
     Log.verbose(`Ganon: FirestoreManager.delete, key: ${String(key)}`);
 
-    if (!this.userManager.isUserLoggedIn()) {
-      throw new SyncError(
-        'Cannot perform delete operation: no user is logged in',
-        SyncErrorType.SyncConfigurationError
-      );
+    if (session.isStale()) {
+      Log.info(`Ganon: aborted stale sync work (delete.start key=${String(key)})`);
+      return;
     }
+
+    const { version } = options;
 
     let accessType: DocumentOrCollection | undefined;
     let accessPath: string | undefined;
     try {
-      const { ref, type } = this.referenceManager.getRefForKey(key);
+      const { ref, type } = this.referenceManager.getRefForKeyForUser(
+        key,
+        this._requireSessionUserId(session)
+      );
       accessType = type;
       accessPath = ref.path;
 
+      const keyStr = String(key);
+      const sanitizedKey = this.dataProcessor.sanitizeFieldName(keyStr);
+      const digestTombstoneEntry = {
+        d: '',
+        v: version,
+        k: this.adapter.fieldDelete(),
+      };
+      const digestTombstones: Record<string, unknown> = {
+        [sanitizedKey]: digestTombstoneEntry,
+      };
+
       if (type === DocumentOrCollection.Document) {
         const docRef = ref as FirebaseFirestoreTypes.DocumentReference;
-        const docSnap = await this.adapter.getDocument(docRef);
+        const fieldDelete = this.adapter.fieldDelete();
+        const payload: Record<string, unknown> = {
+          [sanitizedKey]: fieldDelete,
+          [DIGEST_MAP_KEY]: digestTombstones,
+        };
+        if (sanitizedKey !== keyStr) {
+          payload[keyStr] = fieldDelete;
+        }
 
-        if (docSnap.exists) {
-          const data = docSnap.data();
-          if (data) {
-            const keyStr = String(key);
-            const sanitizedKey = this.dataProcessor.sanitizeFieldName(keyStr);
-
-            // Check both sanitized and original keys
-            const hasOriginalKey = data[keyStr] !== undefined;
-            const hasSanitizedKey = data[sanitizedKey] !== undefined;
-
-            if (hasOriginalKey || hasSanitizedKey) {
-              const updatedData = { ...data };
-
-              if (hasOriginalKey) {
-                delete updatedData[keyStr];
-              }
-
-              if (hasSanitizedKey && sanitizedKey !== keyStr) {
-                delete updatedData[sanitizedKey];
-              }
-
-              await this.adapter.setDocument(docRef, updatedData);
-            }
-          }
+        if (guardSessionBeforeIo(session, 'delete.mergeFieldDelete')) {
+          await this.adapter.setDocument(docRef, payload, { merge: true });
         }
       } else {
         const collRef = ref as FirebaseFirestoreTypes.CollectionReference;
+        const parentDocRef =
+          collRef.parent ??
+          this.referenceManager.getParentDocumentRefForKeyForUser(
+            key,
+            this._requireSessionUserId(session)
+          );
         const snapshot = await this.adapter.getCollection(collRef);
         const batch = this.adapter.writeBatch();
         snapshot.docs.forEach(doc => batch.delete(doc.ref));
-        await batch.commit();
+        batch.set(
+          parentDocRef,
+          { [DIGEST_MAP_KEY]: digestTombstones },
+          { merge: true }
+        );
+        if (guardSessionBeforeIo(session, 'delete.batch.commit')) {
+          await batch.commit();
+        }
+        this.chunkManager.invalidateReadCache(collRef);
       }
     } catch (error) {
       Log.error(`Ganon FirestoreManager: Delete failed for key ${String(key)}: ${error}`);
@@ -784,6 +864,7 @@ export default class FirestoreManager<T extends BaseStorageMapping> implements I
     ref: FirebaseFirestoreTypes.DocumentReference,
     key: Extract<keyof T, string>,
     value: any,
+    session: SessionToken,
     options?: {
       transaction?: FirebaseFirestoreTypes.Transaction;
       digest?: string;
@@ -814,10 +895,14 @@ export default class FirestoreManager<T extends BaseStorageMapping> implements I
     }
 
     if (options?.transaction) {
+      requireSessionInTransaction(session, '_backupDocumentField.txn');
       await this.adapter.setDocumentWithTransaction(options.transaction, ref, payload, {
         merge: true
       });
     } else {
+      if (!guardSessionBeforeIo(session, '_backupDocumentField')) {
+        return;
+      }
       await this.adapter.setDocument(ref, payload, {
         merge: true
       });
@@ -836,41 +921,27 @@ export default class FirestoreManager<T extends BaseStorageMapping> implements I
    */
   async backupLastBackupToUserDocument(
     timestamp: number,
+    session: SessionToken,
     options?: {
       transaction?: FirebaseFirestoreTypes.Transaction;
-      /** User identity at _updateLastBackup schedule time (cross-session guard). */
-      ownerAtSchedule?: string | null;
     }
   ): Promise<void> {
     Log.verbose('Ganon: FirestoreManager.backupLastBackupToUserDocument');
 
-    if (!this.userManager.isUserLoggedIn()) {
-      Log.verbose('Ganon: Skipping lastBackup backup - user not logged in');
+    if (session.isStale()) {
+      Log.info('Ganon: aborted stale sync work (backupLastBackupToUserDocument)');
       return;
     }
 
-    // Identity who earned this lastBackup at schedule time. Must be passed in —
-    // capturing here is useless: getUserRef() is sync, so a local capture cannot
-    // diverge before the first await. Compare against ownerAtSchedule when the
-    // write actually runs (after pending ops / after await boundary).
-    const ownerAtSchedule = options?.ownerAtSchedule;
     try {
-      if (
-        !this.userManager.isUserLoggedIn() ||
-        (ownerAtSchedule !== undefined &&
-          this.userManager.getCurrentUser() !== ownerAtSchedule)
-      ) {
-        Log.info(
-          'Ganon: Skipping lastBackup backup - session torn down before user-doc write',
-        );
-        return;
-      }
-      const userRef = this.referenceManager.getUserRef();
+      const userId = this._requireSessionUserId(session);
+      const userRef = this.referenceManager.getUserRefForUser(userId);
       await this._backupDocumentField(
         userRef,
         'lastBackup' as Extract<keyof T, string>,
         timestamp,
-        options?.transaction !== undefined ? { transaction: options.transaction } : undefined,
+        session,
+        options?.transaction !== undefined ? { transaction: options.transaction } : undefined
       );
       Log.info('Ganon: Successfully backed up lastBackup to user document');
     } catch (error) {
@@ -892,6 +963,7 @@ export default class FirestoreManager<T extends BaseStorageMapping> implements I
     ref: FirebaseFirestoreTypes.CollectionReference,
     key: Extract<keyof T, string>,
     value: any,
+    session: SessionToken,
     options?: {
       transaction?: FirebaseFirestoreTypes.Transaction;
       digest?: string;
@@ -904,15 +976,18 @@ export default class FirestoreManager<T extends BaseStorageMapping> implements I
     const sanitizedData = this.dataProcessor.sanitizeForFirestore(value);
 
     // Use ChunkManager to handle large data
-    await this.chunkManager.writeData(ref, String(key), sanitizedData, options);
+    await this.chunkManager.writeData(ref, String(key), sanitizedData, { ...options, session });
 
     if (options?.digest !== undefined && options?.version !== undefined && ref.parent) {
+      const payloadKind: SubcollectionPayloadKind = Array.isArray(value) ? 'array' : 'object';
       await this._writeInDocumentDigest(
         ref.parent,
         key,
         options.digest,
         options.version,
-        options.transaction
+        session,
+        options.transaction,
+        payloadKind
       );
     }
   }
@@ -925,18 +1000,31 @@ export default class FirestoreManager<T extends BaseStorageMapping> implements I
     key: Extract<keyof T, string>,
     digest: string,
     version: number,
-    transaction?: FirebaseFirestoreTypes.Transaction
+    session: SessionToken,
+    transaction?: FirebaseFirestoreTypes.Transaction,
+    payloadKind?: SubcollectionPayloadKind
   ): Promise<void> {
     const sanitizedKey = this.dataProcessor.sanitizeFieldName(String(key));
+    const digestEntry: { d: string; v: number; k?: SubcollectionPayloadKind } = {
+      d: digest,
+      v: version,
+    };
+    if (payloadKind) {
+      digestEntry.k = payloadKind;
+    }
     const payload = {
       [DIGEST_MAP_KEY]: {
-        [sanitizedKey]: { d: digest, v: version },
+        [sanitizedKey]: digestEntry,
       },
     };
 
     if (transaction) {
+      requireSessionInTransaction(session, '_writeInDocumentDigest.txn');
       await this.adapter.setDocumentWithTransaction(transaction, docRef, payload, { merge: true });
     } else {
+      if (!guardSessionBeforeIo(session, '_writeInDocumentDigest')) {
+        return;
+      }
       await this.adapter.setDocument(docRef, payload, { merge: true });
     }
   }

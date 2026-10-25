@@ -4,12 +4,17 @@ import {
 
 import IFirestoreAdapter from '../models/interfaces/IFirestoreAdapter';
 import { deepMerge } from '../__tests__/utils/deepMerge';
+import { createFieldDeleteMarker } from '../firestore/fieldDeleteMarker';
 
 /**
  * A mock implementation of FirestoreAdapter for testing purposes.
  * Stores data in memory and provides methods to inspect the stored data.
  */
 export class MockFirestoreAdapter implements IFirestoreAdapter {
+  fieldDelete(): unknown {
+    return createFieldDeleteMarker();
+  }
+
   private documents: Map<string, any> = new Map();
   private collections: Map<string, Map<string, any>> = new Map();
   private transactionOperations: Array<() => Promise<void>> = [];

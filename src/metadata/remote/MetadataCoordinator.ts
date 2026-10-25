@@ -11,6 +11,7 @@ import { ResolvedGanonConfig } from "../../models/config/resolveGanonConfig";
 import MetadataStore from "../local/MetadataStore";
 import RemoteMetadataCache from "./RemoteMetadataCache";
 import MetadataFlushQueue from "./MetadataFlushQueue";
+import SessionToken from "../../sync/SessionToken";
 
 /** Per-document metadata coordinator composing cache + flush queue + local store. */
 export default class MetadataCoordinator<T extends BaseStorageMapping> {
@@ -50,9 +51,9 @@ export default class MetadataCoordinator<T extends BaseStorageMapping> {
 
   async needsHydration(key: Extract<keyof T, string>): Promise<boolean> {
     await this.remoteCache.fetch();
-    const remoteMetadata = this.remoteCache.getCached();
     const localMetadata = this.metadataStore.get(key);
-    return (remoteMetadata[key]?.v ?? 0) > localMetadata.version;
+    const remote = this.remoteCache.entryForConfigKey(String(key));
+    return (remote?.v ?? 0) > localMetadata.version;
   }
 
   async getRemoteMetadata(keys?: string[]): Promise<MetadataStorage> {
@@ -129,8 +130,16 @@ export default class MetadataCoordinator<T extends BaseStorageMapping> {
     this.remoteCache.invalidate();
   }
 
+  setSessionProvider(provider: () => SessionToken): void {
+    this.flushQueue.setSessionProvider(provider);
+  }
+
   getCachedRemote(): MetadataStorage {
     return this.remoteCache.getCached();
+  }
+
+  getRemoteEntryForConfigKey(configKey: string): MetadataStorage[string] | undefined {
+    return this.remoteCache.entryForConfigKey(configKey);
   }
 
   /** Test-only: expose conflict strategy source for characterization tests. */
